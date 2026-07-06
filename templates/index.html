@@ -140,6 +140,31 @@
         ::-webkit-scrollbar-thumb:hover { background: linear-gradient(135deg, var(--neon-pink), var(--soft-purple)); }
 
         #loader { position: fixed; top:0; left:0; width:100%; height:100%; background: #050505; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 9999; }
+
+        /* 서울정보소통광장 검색 패널 */
+        .seoul-panel {
+            background: linear-gradient(135deg, rgba(6, 182, 212, 0.1) 0%, rgba(167, 139, 250, 0.08) 100%);
+            border: 1px solid rgba(6, 182, 212, 0.4);
+            border-radius: 15px; padding: 20px 25px; margin-bottom: 30px;
+            backdrop-filter: blur(6px);
+            box-shadow: 0 4px 16px rgba(6, 182, 212, 0.12);
+        }
+        .seoul-panel input { min-width: 260px; }
+        .kw-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+        .kw-chip {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.5);
+            color: var(--neon-green); padding: 4px 10px; border-radius: 20px; font-size: 0.8rem;
+        }
+        .kw-chip button {
+            background: none; border: none; color: var(--accent-pink); cursor: pointer;
+            font-size: 0.9rem; padding: 0; line-height: 1;
+        }
+        .post-dept { color: var(--soft-purple); font-size: 0.72rem; }
+        .seoul-badge {
+            font-size: 0.6rem; color: var(--neon-blue); border: 1px solid var(--neon-blue);
+            border-radius: 4px; padding: 1px 5px; vertical-align: middle; margin-left: 6px;
+        }
     </style>
 </head>
 <body>
@@ -150,6 +175,14 @@
             <h1>JEJE BOARD 2026</h1>
             <div id="status-text" style="color:var(--neon-green); margin-top:10px; font-family:'Orbitron'; font-size:0.8rem;">READY</div>
         </header>
+
+        <div class="seoul-panel">
+            <h3 style="color:var(--neon-blue); font-family:'Orbitron'; margin:0 0 5px;">🏛️ 서울정보소통광장 검색어 모아보기</h3>
+            <p style="color:#aaa; font-size:0.8rem; margin:0 0 15px;">필요한 검색어를 등록하면 opengov.seoul.go.kr 결재문서 검색 결과를 한곳에 모아 최신순으로 보여줍니다.</p>
+            <input type="text" id="seoul-keyword" placeholder="예) 공원, 주차, 청년정책" onkeydown="if(event.key==='Enter')addSeoul()">
+            <button class="btn-main" onclick="addSeoul()">＋ 검색어 추가</button>
+            <div class="kw-chips" id="seoul-chips"></div>
+        </div>
 
         <h2 class="sec-title">🔥 LATEST INTEGRATED FEED (최신 통합 게시글)</h2>
         <div class="latest-section">
@@ -176,13 +209,23 @@
                 document.getElementById('loader').style.display = 'none';
                 document.getElementById('status-text').innerText = `LAST SYNC: ${result.updated_at}`;
 
+                // 0. 서울정보소통광장 등록 검색어 칩 표시
+                const chips = document.getElementById('seoul-chips');
+                const seoulBoards = result.data.filter(b => b.type === 'seoul');
+                chips.innerHTML = seoulBoards.map(b => `
+                    <span class="kw-chip">
+                        ${b.keyword || b.name}
+                        <button title="삭제" onclick="del('${encodeURIComponent(b.url)}')">✕</button>
+                    </span>
+                `).join('') || '<span style="color:#666;font-size:0.8rem;">아직 등록된 검색어가 없습니다.</span>';
+
                 // 1. 최신 통합 피드 채우기
                 const feed = document.getElementById('latest-feed');
                 feed.innerHTML = result.latest_posts.map(p => `
                     <div class="latest-item">
                         <a href="${p.link}" target="_blank">${p.title}</a>
                         <div class="latest-meta">
-                            <span>[${p.source}]</span>
+                            <span>[${p.source}]${p.dept ? ` <span class="post-dept">${p.dept}</span>` : ''}</span>
                             <span>${p.date}</span>
                         </div>
                     </div>
@@ -193,20 +236,35 @@
                 grid.innerHTML = result.data.map(board => `
                     <div class="card">
                         <div class="card-header">
-                            <h3>${board.name} ${board.keyword ? `<small style="color:var(--neon-green)">(${board.keyword})</small>` : ''}</h3>
-                            <button class="btn-del" onclick="del('${board.url}')">DEL</button>
+                            <h3>${board.name} ${board.type === 'seoul' ? '<span class="seoul-badge">SEOUL</span>' : (board.keyword ? `<small style="color:var(--neon-green)">(${board.keyword})</small>` : '')}</h3>
+                            <button class="btn-del" onclick="del('${encodeURIComponent(board.url)}')">DEL</button>
                         </div>
                         <ul class="post-list">
                             ${board.posts.map(p => `
                                 <li class="post-item">
-                                    <a href="${p.link}" target="_blank">${p.title}</a>
+                                    <a href="${p.link}" target="_blank">${p.title}${p.dept ? ` <span class="post-dept">· ${p.dept}</span>` : ''}</a>
                                     <span class="post-date">${p.date}</span>
                                 </li>
-                            `).join('') || '<li>데이터가 없습니다.</li>'}
+                            `).join('') || '<li>검색 결과가 없습니다.</li>'}
                         </ul>
                     </div>
                 `).join('');
             } catch (e) { console.error(e); }
+        }
+
+        async function addSeoul() {
+            const input = document.getElementById('seoul-keyword');
+            const keyword = input.value.trim();
+            if(!keyword) return;
+            const password = prompt("ADMIN PASSWORD:");
+            if(!password) return;
+            const res = await fetch('/api/boards', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ type: 'seoul', keyword, password })
+            });
+            const data = await res.json().catch(() => ({}));
+            if(!res.ok || !data.success) { alert(data.message || '추가에 실패했습니다.'); return; }
+            location.reload();
         }
 
         async function addBoard() {
@@ -219,7 +277,8 @@
             location.reload();
         }
 
-        async function del(url) {
+        async function del(encodedUrl) {
+            const url = decodeURIComponent(encodedUrl);
             const password = prompt("ADMIN PASSWORD:");
             if(!password) return;
             await fetch('/api/boards', { method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url, password}) });
