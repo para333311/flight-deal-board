@@ -162,9 +162,10 @@
         <div class="admin-panel">
             <h3 style="color:var(--neon-green); font-family:'Orbitron';">SYSTEM CONTROL</h3>
             <input type="text" id="name" placeholder="게시판 이름">
-            <input type="text" id="url" placeholder="주소">
+            <input type="text" id="url" placeholder="주소 (네이버블로그 주소도 가능: blog.naver.com/아이디)">
             <input type="text" id="keyword" placeholder="검색어">
             <button class="btn-main" onclick="addBoard()">ADD DATABASE</button>
+            <p id="telegram-info" style="margin-top:20px; font-size:0.8rem; color:#999;"></p>
         </div>
     </div>
 
@@ -226,7 +227,21 @@
             location.reload();
         }
 
+        async function loadTelegramInfo() {
+            try {
+                const res = await fetch('/api/telegram/info');
+                const info = await res.json();
+                const el = document.getElementById('telegram-info');
+                if (info.configured) {
+                    el.innerText = `📡 텔레그램 봇에게 /start 를 보내면 새 글 알림을 받습니다. (현재 구독자: ${info.subscriber_count}명)`;
+                } else {
+                    el.innerText = '📡 텔레그램 알림이 아직 설정되지 않았습니다. (TELEGRAM_BOT_TOKEN 환경변수 필요)';
+                }
+            } catch (e) { console.error(e); }
+        }
+
         load();
+        loadTelegramInfo();
     </script>
 </body>
 </html>
