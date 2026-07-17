@@ -22,6 +22,9 @@ CACHE_FILE = 'cache.json'
 VISITORS_FILE = 'visitors.json'
 ADMIN_PASSWORD = "1111" # 기본 비밀번호
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
+OPENGOV_HOST = 'opengov.seoul.go.kr'
+NAVER_WEB_SEARCH_URL = 'https://search.naver.com/search.naver'
+OPENGOV_DOC_ID_RE = re.compile(r'opengov\.seoul\.go\.kr/sanction/(\d+)')
 
 # 스케줄러 초기화
 scheduler = BackgroundScheduler()
@@ -92,6 +95,19 @@ def parse_date(date_str):
     except:
         return datetime(1900, 1, 1)
 
+def split_keywords(keyword):
+    """마침표나 쉼표로 구분된 검색어를 OR 검색어 목록으로 변환한다."""
+    if not keyword:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            term.strip()
+            for term in re.split(r'[.,|·\n]+', keyword)
+            if term.strip()
+        )
+    )
+
+
 def scrape_board(url, name, keyword):
     posts = []
     try:
@@ -112,10 +128,9 @@ def scrape_board(url, name, keyword):
             if len(title) < 3: continue
             
             # 키워드 필터링 (여러 키워드 지원: OR 조건)
-            if keyword and keyword.strip():
-                keywords = [kw.strip() for kw in keyword.replace('.', ',').split(',') if kw.strip()]
-                if keywords and not any(kw in title for kw in keywords):
-                    continue
+            keywords = split_keywords(keyword)
+            if keywords and not any(kw in title for kw in keywords):
+                continue
             
             link = title_elem.get('href', '')
             if not link or '#' in link or 'javascript' in link:
@@ -145,6 +160,85 @@ def scrape_board(url, name, keyword):
         print(f"Error scraping {name}: {e}")
     
     return posts
+
+
+def scrape_opengov_search_fallback(name, keyword, limit=30):
+    """정보소통광장 접속 차단 시 네이버 웹문서 색인에서 결과를 복구한다.
+
+    Render 같은 해외 서버에서는 정보소통광장 TCP 연결이 자주 차단된다.
+    네이버 검색 결과 중 숫자형 결재문서 URL과 제목만 추출하여 빈 카드가
+    계속 노출되는 것을 막는다. 상세문서는 원래 정보소통광장으로 연결한다.
+    """
+    keywords = split_keywords(keyword)
+    if not keywords:
+        return []
+
+    posts_by_id = {}
+    session = requests.Session()
+    for term in keywords:
+        try:
+            response = session.get(
+                NAVER_WEB_SEARCH_URL,
+                params={
+                    'where': 'web',
+                    'query': f'site:{OPENGOV_HOST}/sanction {term}',
+                },
+                headers=get_headers(NAVER_WEB_SEARCH_URL),
+                timeout=20,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            app.logger.warning('OpenGov fallback search failed for %s: %s', term, exc)
+            continue
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        for anchor in soup.find_all('a', href=True):
+            document_ids = OPENGOV_DOC_ID_RE.findall(anchor.get('href', ''))
+            raw_title = ' '.join(anchor.get_text(' ', strip=True).split())
+            if not document_ids or '> 결재문서' not in raw_title:
+                continue
+
+            title = raw_title.split('> 결재문서', 1)[0].strip(' .')
+            if len(title) < 3 or term not in title:
+                continue
+
+            document_id = document_ids[-1]
+            if document_id in posts_by_id:
+                continue
+
+            container = anchor.find_parent(
+                'div', class_=lambda classes: classes and 'fds-web-normal-doc-root' in classes
+            )
+            container_text = container.get_text(' ', strip=True) if container else ''
+            date_match = re.search(r'20\d{2}[-.]\d{1,2}[-.]\d{1,2}', container_text)
+            date_value = date_match.group() if date_match else ''
+            posts_by_id[document_id] = {
+                'title': title,
+                'link': f'https://{OPENGOV_HOST}/sanction/{document_id}',
+                'date': date_value,
+                'dt_obj': parse_date(date_value),
+                'source': name,
+            }
+
+            if len(posts_by_id) >= limit:
+                break
+        if len(posts_by_id) >= limit:
+            break
+
+    posts = list(posts_by_id.values())
+    posts.sort(key=lambda post: post['dt_obj'], reverse=True)
+    app.logger.info('%s: search fallback recovered %d OpenGov documents', name, len(posts))
+    return posts
+
+
+def scrape_configured_board(board):
+    """게시판을 수집하고 정보소통광장만 검색 색인으로 자동 우회한다."""
+    keyword = board.get('keyword', '')
+    posts = scrape_board(board['url'], board['name'], keyword)
+    if not posts and OPENGOV_HOST in board.get('url', ''):
+        posts = scrape_opengov_search_fallback(board['name'], keyword)
+    return posts
+
 
 def load_cache():
     """캐시 파일에서 데이터 로드"""
@@ -255,7 +349,7 @@ def background_scrape():
 
     for board in config.get('boards', []):
         kw = board.get('keyword', '')
-        posts = scrape_board(board['url'], board['name'], kw)
+        posts = scrape_configured_board(board)
 
         # 개별 게시판 결과 저장
         clean_posts = []
