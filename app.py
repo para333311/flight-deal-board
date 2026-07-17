@@ -32,23 +32,50 @@ def get_headers(url):
     }
 
 def parse_date(date_str):
-    if not date_str: return datetime(1900, 1, 1)
+    if not date_str:
+        return datetime(1900, 1, 1)
     try:
         clean_date = re.sub(r'[^0-9-]', '-', date_str.replace('.', '-')).strip('-')
         parts = clean_date.split('-')
-        if len(parts[0]) == 2: parts[0] = '20' + parts[0]
+        if len(parts[0]) == 2:
+            parts[0] = '20' + parts[0]
         return datetime.strptime("-".join(parts[:3]), '%Y-%m-%d')
-    except:
+    except (TypeError, ValueError, IndexError):
         return datetime(1900, 1, 1)
+
+
+def split_keywords(keyword):
+    """관리자 입력 문자열을 OR 검색어 목록으로 변환한다.
+
+    기존 설정은 ``재개발.신속통합.일대``처럼 마침표를 구분자로
+    사용한다. 이를 한 문장으로 비교하면 어떤 제목도 통과할 수 없으므로
+    마침표, 쉼표, 세로줄, 줄바꿈을 모두 구분자로 처리한다.
+    """
+    if not keyword:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            term.strip()
+            for term in re.split(r'[.,|·\n]+', keyword)
+            if term.strip()
+        )
+    )
+
+
+def title_matches_keywords(title, keyword):
+    keywords = split_keywords(keyword)
+    return not keywords or any(term in title for term in keywords)
+
 
 def scrape_board(url, name, keyword):
     posts = []
     try:
         session = requests.Session()
         response = session.get(url, headers=get_headers(url), verify=False, timeout=15)
-        response.encoding = 'utf-8'
+        response.raise_for_status()
+        response.encoding = response.apparent_encoding or 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
-        
+
         rows = soup.select('table tbody tr, .board-list tr, .bbs-list tr, .list_type li, .news-list li, .search-result-list li, .list-wrap li')
         if not rows:
             rows = soup.select('.title, .subject, .txt_left, .tit')
@@ -60,10 +87,9 @@ def scrape_board(url, name, keyword):
             title = title_elem.get_text(strip=True)
             if len(title) < 3: continue
             
-            # 키워드 필터링
-            if keyword and keyword.strip():
-                if keyword.strip() not in title:
-                    continue
+            # 설정의 구분된 검색어 중 하나라도 제목에 있으면 표시한다.
+            if not title_matches_keywords(title, keyword):
+                continue
             
             link = title_elem.get('href', '')
             if not link or '#' in link or 'javascript' in link:
@@ -89,8 +115,10 @@ def scrape_board(url, name, keyword):
             
         posts.sort(key=lambda x: x['dt_obj'], reverse=True)
         
-    except Exception as e:
-        print(f"Error scraping {name}: {e}")
+    except requests.RequestException as e:
+        app.logger.warning("Error scraping %s (%s): %s", name, url, e)
+    except Exception:
+        app.logger.exception("Unexpected scraping error for %s (%s)", name, url)
     
     return posts
 
