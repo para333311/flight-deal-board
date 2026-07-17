@@ -4,8 +4,8 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, render_template, request, jsonify
-from datetime import datetime
-from urllib.parse import urljoin
+from datetime import date, datetime, timedelta
+from urllib.parse import urlencode, urljoin
 import urllib3
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
@@ -23,8 +23,16 @@ VISITORS_FILE = 'visitors.json'
 ADMIN_PASSWORD = "1111" # 기본 비밀번호
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
 OPENGOV_HOST = 'opengov.seoul.go.kr'
+OPEN_PORTAL_LIST_URL = 'https://www.open.go.kr/othicInfo/infoList/infoList.do'
+OPEN_PORTAL_SEARCH_URL = 'https://www.open.go.kr/othicInfo/infoList/mnstrSanDocList.ajax'
 NAVER_WEB_SEARCH_URL = 'https://search.naver.com/search.naver'
 OPENGOV_DOC_ID_RE = re.compile(r'opengov\.seoul\.go\.kr/sanction/(\d+)')
+RECENT_DOCUMENT_DAYS = 180
+POSTS_PER_BOARD = 5
+SEOUL_TARGET_DISTRICTS = (
+    '강남구', '강동구', '광진구', '동대문구', '동작구', '마포구', '서대문구',
+    '서초구', '성동구', '송파구', '영등포구', '용산구', '종로구', '중구',
+)
 
 # 스케줄러 초기화
 scheduler = BackgroundScheduler()
@@ -115,7 +123,7 @@ def scrape_board(url, name, keyword):
         response = session.get(url, headers=get_headers(url), verify=False, timeout=15)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
-        
+
         rows = soup.select('table tbody tr, .board-list tr, .bbs-list tr, .list_type li, .news-list li, .search-result-list li, .list-wrap li')
         if not rows:
             rows = soup.select('.title, .subject, .txt_left, .tit')
@@ -123,29 +131,29 @@ def scrape_board(url, name, keyword):
         for row in rows:
             title_elem = row.select_one('a, .tit, .subject, .title')
             if not title_elem: continue
-            
+
             title = title_elem.get_text(strip=True)
             if len(title) < 3: continue
-            
+
             # 키워드 필터링 (여러 키워드 지원: OR 조건)
             keywords = split_keywords(keyword)
             if keywords and not any(kw in title for kw in keywords):
                 continue
-            
+
             link = title_elem.get('href', '')
             if not link or '#' in link or 'javascript' in link:
                 parent_a = row.find_parent('a') or row.find('a')
                 if parent_a: link = parent_a.get('href', '')
 
             full_link = urljoin(url, link)
-            
+
             date_val = ""
             for elem in row.select('td, span, .date, .reg_date, .day'):
                 txt = elem.get_text(strip=True)
                 if re.search(r'\d{2,4}[-./]\d{1,2}[-./]\d{1,2}', txt):
                     date_val = txt
                     break
-            
+
             posts.append({
                 'title': title,
                 'link': full_link,
@@ -153,13 +161,105 @@ def scrape_board(url, name, keyword):
                 'dt_obj': parse_date(date_val),
                 'source': name
             })
-            
+
         posts.sort(key=lambda x: x['dt_obj'], reverse=True)
-        
+
     except Exception as e:
         print(f"Error scraping {name}: {e}")
-    
+
     return posts
+
+
+def scrape_open_portal(name, keyword, limit=30):
+    """정보공개포털 공식 AJAX 검색에서 최근 서울시 결재문서를 가져온다."""
+    keywords = split_keywords(keyword)
+    if not keywords:
+        return []
+
+    today = date.today()
+    start = today - timedelta(days=RECENT_DOCUMENT_DAYS)
+    session = requests.Session()
+    session.get(
+        OPEN_PORTAL_LIST_URL,
+        headers=get_headers(OPEN_PORTAL_LIST_URL),
+        timeout=20,
+    ).raise_for_status()
+
+    posts_by_id = {}
+    headers = get_headers(OPEN_PORTAL_LIST_URL)
+    headers['X-Requested-With'] = 'XMLHttpRequest'
+    for term in keywords:
+        payload = {
+            'kwd': term,
+            'preKwds': term,
+            'reSrchFlag': 'off',
+            'othbcSeCd': '',
+            'insttSeCd': '',
+            'eduYn': 'N',
+            'startDate': start.strftime('%Y%m%d'),
+            'endDate': today.strftime('%Y%m%d'),
+            'insttCdNm': '',
+            'insttCd': '',
+            'searchInsttCdNmPop': '',
+            'searchMainYn': '',
+            'viewPage': '1',
+            'rowPage': '100',
+            'sort': 's',
+        }
+        response = session.post(
+            OPEN_PORTAL_SEARCH_URL,
+            data=payload,
+            headers=headers,
+            timeout=50,
+        )
+        response.raise_for_status()
+        data = response.json()
+        result = data.get('result') or data
+        if str(result.get('code')) != '200':
+            raise RuntimeError(
+                f"Open.go.kr search error ({term}): {result.get('code')}"
+            )
+
+        for row in result.get('rtnList') or []:
+            title = str(row.get('INFO_SJ') or '').strip()
+            if not title or term not in title:
+                continue
+
+            agency = str(row.get('PROC_INSTT_NM') or '').strip()
+            department = str(row.get('NFLST_CHRG_DEPT_NM') or '').strip()
+            is_seoul = agency == '서울특별시' or any(
+                agency == f'서울특별시 {district}'
+                or f'서울특별시 {district}' in department
+                for district in SEOUL_TARGET_DISTRICTS
+            )
+            if not is_seoul:
+                continue
+
+            document_id = str(row.get('PRDCTN_INSTT_REGIST_NO') or '').strip()
+            produced = str(row.get('PRDCTN_DT') or '').strip()
+            if not document_id or len(produced) < 8 or not produced[:8].isdigit():
+                continue
+
+            date_value = f'{produced[:4]}-{produced[4:6]}-{produced[6:8]}'
+            query = urlencode({
+                'prdnNstRgstNo': document_id,
+                'prdnDt': produced,
+                'nstSeCd': str(row.get('INSTT_SE_CD') or '').strip(),
+                'title': '기관장결재문서',
+            })
+            posts_by_id[document_id] = {
+                'title': f'[{agency or "서울특별시"}] {title}',
+                'link': f'https://www.open.go.kr/othicInfo/infoList/infoListDetl3.do?{query}',
+                'date': date_value,
+                'dt_obj': parse_date(date_value),
+                'source': name,
+            }
+
+    posts = sorted(
+        posts_by_id.values(), key=lambda post: post['dt_obj'], reverse=True
+    )
+    app.logger.info('%s: Open.go.kr recovered %d documents', name, len(posts))
+    return posts[:limit]
 
 
 def scrape_opengov_search_fallback(name, keyword, limit=30):
@@ -211,12 +311,20 @@ def scrape_opengov_search_fallback(name, keyword, limit=30):
             )
             container_text = container.get_text(' ', strip=True) if container else ''
             date_match = re.search(r'20\d{2}[-.]\d{1,2}[-.]\d{1,2}', container_text)
-            date_value = date_match.group() if date_match else ''
+            if not date_match:
+                continue
+            date_value = date_match.group()
+            date_object = parse_date(date_value)
+            cutoff = datetime.combine(
+                date.today() - timedelta(days=RECENT_DOCUMENT_DAYS), datetime.min.time()
+            )
+            if date_object < cutoff:
+                continue
             posts_by_id[document_id] = {
                 'title': title,
                 'link': f'https://{OPENGOV_HOST}/sanction/{document_id}',
                 'date': date_value,
-                'dt_obj': parse_date(date_value),
+                'dt_obj': date_object,
                 'source': name,
             }
 
@@ -232,12 +340,18 @@ def scrape_opengov_search_fallback(name, keyword, limit=30):
 
 
 def scrape_configured_board(board):
-    """게시판을 수집하고 정보소통광장만 검색 색인으로 자동 우회한다."""
+    """게시판을 수집하고 정보소통광장은 공식 포털을 우선 사용한다."""
     keyword = board.get('keyword', '')
-    posts = scrape_board(board['url'], board['name'], keyword)
-    if not posts and OPENGOV_HOST in board.get('url', ''):
-        posts = scrape_opengov_search_fallback(board['name'], keyword)
-    return posts
+    if OPENGOV_HOST in board.get('url', ''):
+        try:
+            posts = scrape_open_portal(board['name'], keyword)
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            app.logger.warning('Open.go.kr search failed: %s', exc)
+            posts = []
+        if posts:
+            return posts
+        return scrape_opengov_search_fallback(board['name'], keyword)
+    return scrape_board(board['url'], board['name'], keyword)
 
 
 def load_cache():
@@ -363,7 +477,7 @@ def background_scrape():
             'name': board['name'],
             'url': board['url'],
             'keyword': kw,
-            'posts': clean_posts[:15]
+            'posts': clean_posts[:POSTS_PER_BOARD]
         })
 
     # 중복 제거 (URL 기준)
@@ -383,7 +497,7 @@ def background_scrape():
     cache_data = {
         'success': True,
         'data': all_results,
-        'latest_posts': unique_feed[:30],
+        'latest_posts': unique_feed[:POSTS_PER_BOARD],
         'updated_at': get_korean_time().strftime('%Y-%m-%d %H:%M:%S')
     }
     save_cache(cache_data)
