@@ -1,0 +1,59 @@
+{
+  "boards": [
+    {
+      "name": "서울시결재문서",
+      "url": "https://opengov.seoul.go.kr/sanction/list",
+      "keyword": "재개발.신속통합.일대.후보지.수권.정비계획.동의서"
+    },
+    {
+      "name": "강남구",
+      "url": "https://www.gangnam.go.kr/board/union6/list.do?mid=ID02_01130505",
+      "keyword": ""
+    },
+    {
+      "name": "동작구",
+      "url": "https://www.dongjak.go.kr/portal/bbs/B0001387/list.do?menuNo=201575",
+      "keyword": ""
+    },
+    {
+      "name": "마포구",
+      "url": "https://www.mapo.go.kr/site/main/board/notice/list?baCommSelec=false&sc=&sv=%EC%8B%A0%EC%86%8D%ED%86%B5%ED%95%A9&pageSize=10",
+      "keyword": ""
+    },
+    {
+      "name": "용산구",
+      "url": "https://www.yongsan.go.kr/portal/bbs/B0000170/list.do?menuNo=200848&deptId=3020154&sdate=&edate=&searchCnd=1&searchWrd=",
+      "keyword": ""
+    },
+    {
+      "name": "성동구",
+      "url": "https://www.sd.go.kr/main/selectBbsNttList.do?key=1307&bbsNo=166&integrDeptCode=&searchCtgry=&searchCnd=SJ&searchKrwd=%EB%8F%99%EC%9D%98%EC%84%9C",
+      "keyword": ""
+    },
+    {
+      "name": "종로구",
+      "url": "https://www.jongno.go.kr/portal/bbs/selectBoardList.do?bbsId=BBSMSTR_000000000175&menuId=400675&menuNo=400675",
+      "keyword": ""
+    },
+    {
+      "name": "동대문구",
+      "url": "https://www.ddm.go.kr/www/selectBbsNttList.do?bbsNo=38&key=904&searchCtgry=%EB%8F%84%EC%8B%9C%EC%A0%95%EB%B9%84",
+      "keyword": ""
+    },
+    {
+      "name": "영등포구",
+      "url": "https://www.ydp.go.kr/www/selectBbsNttList.do?key=2848&bbsNo=40&integrDeptCode=&searchCtgry=&pageUnit=10&searchCnd=SJ&searchKrwd=%EC%8B%A0%EC%86%8D%ED%86%B5%ED%95%A9",
+      "keyword": ""
+    },
+    {
+      "name": "광진구",
+      "url": "https://www.gwangjin.go.kr/portal/bbs/B0000001/list.do?pageIndex=1&menuNo=200190&deptId=&searchCnd=1&searchWrd=%EB%B2%88%ED%98%B8%EB%B6%80%EC%97%AC&sdate=&edate=&csrfToken=bafb0e33-649e-4ecf-a621-be7e8a9abfc4",
+      "keyword": ""
+    },
+    {
+      "name": "강동구",
+      "url": "https://www.gangdong.go.kr/web/newportal/bbs/b_111",
+      "keyword": ""
+    }
+  ]
+}
