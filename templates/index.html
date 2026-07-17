@@ -129,7 +129,40 @@
             background: rgba(244, 114, 182, 0.2);
             transform: scale(1.1);
         }
-        
+
+        /* 새로고침 버튼 */
+        .btn-refresh {
+            background: linear-gradient(135deg, var(--neon-green), var(--neon-blue));
+            color: #fff; font-weight: 700; border: none; padding: 8px 20px;
+            border-radius: 8px; cursor: pointer; font-family: 'Orbitron'; font-size: 0.75rem;
+            transition: transform 0.2s, box-shadow 0.3s;
+            margin-left: 10px;
+        }
+        .btn-refresh:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 20px rgba(16, 185, 129, 0.4);
+        }
+        .btn-refresh:active {
+            transform: scale(0.95);
+        }
+
+        /* 방문자 카운터 */
+        .visitor-counter {
+            margin-top: 15px;
+            font-family: 'Orbitron';
+            font-size: 0.75rem;
+            color: var(--neon-pink);
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+        }
+        .visitor-counter span {
+            background: rgba(167, 139, 250, 0.1);
+            padding: 5px 15px;
+            border-radius: 5px;
+            border: 1px solid rgba(167, 139, 250, 0.3);
+        }
+
         /* 스크롤바 커스터마이징 */
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); border-radius: 10px; }
@@ -148,7 +181,14 @@
     <div class="container">
         <header>
             <h1>JEJE BOARD 2026</h1>
-            <div id="status-text" style="color:var(--neon-green); margin-top:10px; font-family:'Orbitron'; font-size:0.8rem;">READY</div>
+            <div id="status-text" style="color:var(--neon-green); margin-top:10px; font-family:'Orbitron'; font-size:0.8rem;">
+                READY
+                <button class="btn-refresh" onclick="refreshData()">🔄 새로고침</button>
+            </div>
+            <div class="visitor-counter">
+                <span>TODAY: <strong id="today-count">0</strong></span>
+                <span>TOTAL: <strong id="total-count">0</strong></span>
+            </div>
         </header>
 
         <h2 class="sec-title">🔥 LATEST INTEGRATED FEED (최신 통합 게시글)</h2>
@@ -174,7 +214,7 @@
                 const res = await fetch('/api/scrape_all');
                 const result = await res.json();
                 document.getElementById('loader').style.display = 'none';
-                document.getElementById('status-text').innerText = `LAST SYNC: ${result.updated_at}`;
+                document.getElementById('status-text').innerHTML = `LAST SYNC: ${result.updated_at} <button class="btn-refresh" onclick="refreshData()">🔄 새로고침</button>`;
 
                 // 1. 최신 통합 피드 채우기
                 const feed = document.getElementById('latest-feed');
@@ -226,6 +266,82 @@
             location.reload();
         }
 
+        async function refreshData() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '🔄 새로고침 중...';
+
+            try {
+                const res = await fetch('/api/refresh', { method: 'POST' });
+                const result = await res.json();
+
+                if (result.success) {
+                    document.getElementById('status-text').innerHTML = `LAST SYNC: ${result.updated_at} <button class="btn-refresh" onclick="refreshData()">🔄 새로고침</button>`;
+
+                    // 피드 업데이트
+                    const feed = document.getElementById('latest-feed');
+                    feed.innerHTML = result.latest_posts.map(p => `
+                        <div class="latest-item">
+                            <a href="${p.link}" target="_blank">${p.title}</a>
+                            <div class="latest-meta">
+                                <span>[${p.source}]</span>
+                                <span>${p.date}</span>
+                            </div>
+                        </div>
+                    `).join('') || '<p>최근 게시글이 없습니다.</p>';
+
+                    // 게시판별 그리드 업데이트
+                    const grid = document.getElementById('grid');
+                    grid.innerHTML = result.data.map(board => `
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>${board.name} ${board.keyword ? `<small style="color:var(--neon-green)">(${board.keyword})</small>` : ''}</h3>
+                                <button class="btn-del" onclick="del('${board.url}')">DEL</button>
+                            </div>
+                            <ul class="post-list">
+                                ${board.posts.map(p => `
+                                    <li class="post-item">
+                                        <a href="${p.link}" target="_blank">${p.title}</a>
+                                        <span class="post-date">${p.date}</span>
+                                    </li>
+                                `).join('') || '<li>데이터가 없습니다.</li>'}
+                            </ul>
+                        </div>
+                    `).join('');
+
+                    alert('✅ 새로고침 완료!');
+                } else {
+                    alert('❌ 새로고침 실패');
+                }
+            } catch (e) {
+                alert('❌ 에러 발생: ' + e.message);
+            }
+        }
+
+        async function loadVisitors() {
+            try {
+                const res = await fetch('/api/visitors');
+                const data = await res.json();
+                document.getElementById('today-count').textContent = data.today;
+                document.getElementById('total-count').textContent = data.total;
+            } catch (e) {
+                console.error('방문자 데이터 로드 실패:', e);
+            }
+        }
+
+        async function incrementVisit() {
+            try {
+                const res = await fetch('/api/visitors', { method: 'POST' });
+                const data = await res.json();
+                document.getElementById('today-count').textContent = data.today;
+                document.getElementById('total-count').textContent = data.total;
+            } catch (e) {
+                console.error('방문 카운트 실패:', e);
+            }
+        }
+
+        // 페이지 로드 시 실행
+        incrementVisit();
         load();
     </script>
 </body>
