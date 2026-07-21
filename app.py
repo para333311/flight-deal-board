@@ -145,14 +145,15 @@ def scrape_board(url, name, keyword):
             response.encoding = response.apparent_encoding or 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        rows = soup.select('table tbody tr, .board-list tr, .bbs-list tr, .list_type li, .news-list li, .search-result-list li, .list-wrap li')
+        rows = soup.select('table tbody tr, .board-list tr, .bbs-list tr, .list_type li, .news-list li, .search-result-list li, .list-wrap li, .list_item')
         if not rows:
             rows = soup.select('.title, .subject, .txt_left, .tit')
 
         for row in rows:
-            # 뽐뿌처럼 제목 앞에 분류/댓글 링크가 붙는 게시판은 제목 앵커를 우선 사용
+            # 뽐뿌/클리앙/루리웹처럼 제목 앞에 분류·댓글 링크가 붙는 게시판은
+            # 제목 앵커를 우선 사용
             title_elem = (
-                row.select_one('a.baseList-title, a.list_subject')
+                row.select_one('a.baseList-title, a.list_subject, a.deco')
                 or row.select_one('a, .tit, .subject, .title')
             )
             if not title_elem: continue
