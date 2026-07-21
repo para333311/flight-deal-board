@@ -4,3 +4,5 @@ __pycache__/
 cache.json
 visitors.json
 config.json
+sent_deals.json
+deals_cache.json
