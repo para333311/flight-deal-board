@@ -27,6 +27,9 @@ DEALS_CACHE_FILE = 'deals_cache.json'
 ADMIN_PASSWORD = "1111" # 기본 비밀번호
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
+NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
+NAVER_CAFE_API_URL = 'https://openapi.naver.com/v1/search/cafearticle.json'
 TELEGRAM_MESSAGE_LIMIT = 4096
 DEAL_CHECK_INTERVAL_MINUTES = 30
 MAX_DEALS_PER_ALERT = 10
@@ -407,9 +410,64 @@ def scrape_rss(url, name, keyword):
     return posts
 
 
+def scrape_naver_cafe(name, keyword):
+    """네이버 검색 오픈API로 공개 카페글을 검색한다.
+
+    네이버 카페는 로그인 장벽 때문에 직접 크롤링이 불가능하므로 공식 검색
+    API(cafearticle)를 사용한다. NAVER_CLIENT_ID / NAVER_CLIENT_SECRET
+    환경변수가 있어야 동작하며, 없으면 빈 목록을 반환한다.
+    키워드 각각을 검색어로 사용한다. (예: "항공권 특가.항공 땡처리")
+    """
+    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+        return []
+
+    keywords = split_keywords(keyword)
+    if not keywords:
+        return []
+
+    tag_re = re.compile(r'<[^>]+>')
+    posts_by_link = {}
+    headers = {
+        'X-Naver-Client-Id': NAVER_CLIENT_ID,
+        'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
+    }
+    for term in keywords:
+        try:
+            response = requests.get(
+                NAVER_CAFE_API_URL,
+                params={'query': term, 'display': 30, 'sort': 'date'},
+                headers=headers,
+                timeout=15,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            app.logger.warning('네이버 카페 검색 실패 (%s): %s', term, exc)
+            continue
+
+        for item in response.json().get('items', []):
+            title = tag_re.sub('', item.get('title') or '')
+            title = title.replace('&quot;', '"').replace('&amp;', '&').strip()
+            link = (item.get('link') or '').strip()
+            if len(title) < 3 or not link or link in posts_by_link:
+                continue
+            cafe = (item.get('cafename') or '').strip()
+            posts_by_link[link] = {
+                'title': f'[{cafe}] {title}' if cafe else title,
+                'link': link,
+                'date': '',
+                # API가 작성일을 주지 않으므로 최신순 정렬만 신뢰한다
+                'dt_obj': datetime(1900, 1, 1),
+                'source': name,
+            }
+
+    return list(posts_by_link.values())
+
+
 def scrape_configured_board(board):
     """게시판을 수집하고 정보소통광장은 공식 포털을 우선 사용한다."""
     keyword = board.get('keyword', '')
+    if board.get('type') == 'naver_cafe':
+        return scrape_naver_cafe(board['name'], keyword)
     if board.get('type') == 'rss' or 'rss.php' in board.get('url', ''):
         return scrape_rss(board['url'], board['name'], keyword)
     if OPENGOV_HOST in board.get('url', ''):
@@ -845,16 +903,19 @@ def api_deals_debug():
     report = []
     for board in load_config().get('deal_boards', []):
         entry = {'name': board.get('name'), 'url': board.get('url')}
-        try:
-            response = requests.get(
-                board['url'], headers=get_headers(board['url']),
-                verify=False, timeout=15,
-            )
-            entry['http_status'] = response.status_code
-            entry['response_bytes'] = len(response.content)
-        except requests.RequestException as exc:
-            entry['http_status'] = None
-            entry['fetch_error'] = str(exc)
+        if board.get('type') == 'naver_cafe':
+            entry['api_configured'] = bool(NAVER_CLIENT_ID and NAVER_CLIENT_SECRET)
+        elif board.get('url'):
+            try:
+                response = requests.get(
+                    board['url'], headers=get_headers(board['url']),
+                    verify=False, timeout=15,
+                )
+                entry['http_status'] = response.status_code
+                entry['response_bytes'] = len(response.content)
+            except requests.RequestException as exc:
+                entry['http_status'] = None
+                entry['fetch_error'] = str(exc)
 
         try:
             posts = scrape_configured_board(board)
