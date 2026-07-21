@@ -815,11 +815,17 @@ def api_deals():
             pass
     return jsonify({'success': True, 'deals': [], 'updated_at': None})
 
-@app.route('/api/deals/check', methods=['POST'])
+@app.route('/api/deals/check', methods=['GET', 'POST'])
 def api_deals_check():
-    """즉시 특가 확인 + 새 글 있으면 텔레그램 전송 (테스트/수동 실행용)"""
-    data = request.json or {}
-    if data.get('password') != ADMIN_PASSWORD:
+    """즉시 특가 확인 + 새 글 있으면 텔레그램 전송 (테스트/수동 실행용)
+
+    브라우저에서 바로 실행: /api/deals/check?pw=1111
+    """
+    if request.method == 'POST':
+        password = (request.json or {}).get('password')
+    else:
+        password = request.args.get('pw')
+    if password != ADMIN_PASSWORD:
         return jsonify({'success': False, 'message': 'Password Denied'}), 403
 
     new_posts = check_airline_deals()
