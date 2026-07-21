@@ -188,11 +188,10 @@ class DealNotificationTests(unittest.TestCase):
             "deal_boards": [{"name": "뽐뿌", "url": "https://example.com", "keyword": "항공"}]
         }
 
-        # 최초 실행: 시작 안내만 전송
+        # 최초 실행: 기존 글은 알림 없이 기록만 (재시작 시 인사 반복 방지)
         scrape.return_value = [_deal(1, "제주항공 동남아 50% 할인코드")]
         self.assertEqual(app.check_airline_deals(), [])
-        self.assertEqual(send.call_count, 1)
-        self.assertIn("시작", send.call_args[0][0])
+        send.assert_not_called()
 
         # 새 글 등장: 특가 알림 전송
         send.reset_mock()
@@ -219,19 +218,14 @@ class DealNotificationTests(unittest.TestCase):
     @patch("app.send_telegram_message")
     @patch("app.scrape_configured_board", return_value=[])
     @patch("app.load_config")
-    def test_check_airline_deals_sends_start_even_with_no_posts(
+    def test_check_airline_deals_is_silent_when_no_posts(
         self, load_config, scrape, send
     ):
         load_config.return_value = {
             "deal_boards": [{"name": "뽐뿌", "url": "https://example.com", "keyword": "항공"}]
         }
-        # 글이 0건이어도 최초 실행 시작 메시지는 나가야 한다 (텔레그램 연결 확인용)
+        # 최초 실행이든 이후든, 글이 없으면 아무 알림도 보내지 않는다
         self.assertEqual(app.check_airline_deals(), [])
-        self.assertEqual(send.call_count, 1)
-        self.assertIn("시작", send.call_args[0][0])
-
-        # 이후 실행은 시작 메시지를 반복하지 않는다
-        send.reset_mock()
         self.assertEqual(app.check_airline_deals(), [])
         send.assert_not_called()
 

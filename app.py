@@ -717,15 +717,10 @@ def check_airline_deals():
     new_posts, first_run = claim_new_deals(posts)
 
     if first_run:
-        if posts:
-            body = f"현재 특가 게시판에 {len(posts)}건이 있고, 앞으로 새 특가가 뜨면 바로 알려드릴게요."
-        else:
-            body = (
-                "지금은 수집된 특가 글이 없어요. (게시판 접근이 잠시 막혔을 수 있어요)\n"
-                "그래도 앞으로 새 특가가 확인되면 바로 알려드릴게요."
-            )
-        send_telegram_message("✈️ 제제보드 항공 특가 알림을 시작합니다!\n" + body)
-        print(f"항공 특가 알림 최초 실행: 기존 {len(posts)}건 기록 완료")
+        # 시작 인사는 보내지 않는다. DB가 없으면 재시작/배포 때마다 최초 실행으로
+        # 판정되어 같은 인사가 반복 전송되기 때문. 기존 글은 조용히 기록만 한다.
+        # (연결 확인은 /api/telegram/test 사용)
+        print(f"항공 특가 알림 최초 실행: 기존 {len(posts)}건 기록 완료 (알림 없이 시작)")
         return []
 
     if not posts:
