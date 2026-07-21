@@ -561,12 +561,25 @@ def claim_new_deals(posts):
     최초 실행 시에는 기존 글을 전부 '보낸 것'으로만 기록하고 알림은 보내지 않는다.
     (봇을 처음 켰을 때 옛날 글 수십 개가 한꺼번에 쏟아지는 것을 방지)
     """
+    # 최초 실행 여부는 글 개수가 아니라 별도 표식(__seeded__)으로 판별한다.
+    # (뽐뿌가 막혀 글이 0건이어도 최초 실행 시작 메시지가 정상적으로 나가도록)
+    seed_marker = '__seeded__'
+
     if DATABASE_URL:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM sent_deals")
-            first_run = cursor.fetchone()[0] == 0
+            cursor.execute("SELECT 1 FROM sent_deals WHERE link = %s", (seed_marker,))
+            first_run = cursor.fetchone() is None
+            if first_run:
+                cursor.execute(
+                    """
+                    INSERT INTO sent_deals (link, title, source)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (link) DO NOTHING
+                    """,
+                    (seed_marker, '알림 시작 표식', 'system'),
+                )
 
             new_posts = []
             for post in posts:
@@ -598,8 +611,9 @@ def claim_new_deals(posts):
         except Exception:
             pass
 
-    new_posts = [p for p in posts if p['link'] not in seen]
+    new_posts = [p for p in posts if p['link'] not in seen and p['link'] != seed_marker]
     seen.update(p['link'] for p in posts)
+    seen.add(seed_marker)  # 글이 0건이어도 파일을 생성해 최초 실행 표식을 남긴다
     with open(SENT_DEALS_FILE, 'w', encoding='utf-8') as f:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
     return ([] if first_run else new_posts), first_run
@@ -650,18 +664,22 @@ def check_airline_deals():
     except Exception as e:
         print(f"❌ 특가 캐시 저장 오류: {e}")
 
-    if not posts:
-        print("항공 특가 확인 완료: 수집된 글 없음 (게시판 접근 차단 여부 확인 필요)")
-        return []
-
     new_posts, first_run = claim_new_deals(posts)
 
     if first_run:
-        send_telegram_message(
-            "✈️ 제제보드 항공 특가 알림을 시작합니다!\n"
-            f"현재 특가 게시판에 {len(posts)}건이 있고, 앞으로 새 특가가 뜨면 바로 알려드릴게요."
-        )
+        if posts:
+            body = f"현재 특가 게시판에 {len(posts)}건이 있고, 앞으로 새 특가가 뜨면 바로 알려드릴게요."
+        else:
+            body = (
+                "지금은 수집된 특가 글이 없어요. (게시판 접근이 잠시 막혔을 수 있어요)\n"
+                "그래도 앞으로 새 특가가 확인되면 바로 알려드릴게요."
+            )
+        send_telegram_message("✈️ 제제보드 항공 특가 알림을 시작합니다!\n" + body)
         print(f"항공 특가 알림 최초 실행: 기존 {len(posts)}건 기록 완료")
+        return []
+
+    if not posts:
+        print("항공 특가 확인 완료: 수집된 글 없음 (게시판 접근 차단 여부 확인 필요)")
         return []
 
     if new_posts:
@@ -762,11 +780,18 @@ def api_deals_check():
         'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     })
 
-@app.route('/api/telegram/test', methods=['POST'])
+@app.route('/api/telegram/test', methods=['GET', 'POST'])
 def api_telegram_test():
-    """텔레그램 봇 연결 테스트 메시지 전송"""
-    data = request.json or {}
-    if data.get('password') != ADMIN_PASSWORD:
+    """텔레그램 봇 연결 테스트 메시지 전송.
+
+    브라우저에서 바로 확인할 수 있도록 GET 도 허용한다.
+    예) https://<도메인>/api/telegram/test?pw=1111
+    """
+    if request.method == 'POST':
+        password = (request.json or {}).get('password')
+    else:
+        password = request.args.get('pw')
+    if password != ADMIN_PASSWORD:
         return jsonify({'success': False, 'message': 'Password Denied'}), 403
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -776,7 +801,11 @@ def api_telegram_test():
         })
 
     ok = send_telegram_message('✅ 제제보드 항공 특가 알림 테스트 메시지입니다!')
-    return jsonify({'success': ok})
+    return jsonify({
+        'success': ok,
+        'message': '텔레그램으로 테스트 메시지를 보냈습니다. 봇 채팅방을 확인하세요.'
+        if ok else '텔레그램 전송에 실패했습니다. 봇 토큰/chat_id를 확인하세요.',
+    })
 
 @app.route('/api/visitors', methods=['GET', 'POST'])
 def visitors():
