@@ -740,6 +740,11 @@ def check_airline_deals():
     return new_posts
 
 
+# gunicorn 배포에서는 __main__ 블록이 실행되지 않으므로 모듈 로드 시점에
+# 테이블을 준비한다. (없으면 sent_deals 기록이 파일로만 남아 배포 때마다
+# 초기화되고, 시작 메시지가 반복 전송된다)
+init_db()
+
 # gunicorn 배포에서도 알림이 돌도록 모듈 로드 시점에 잡을 등록한다.
 # (텔레그램 미설정 상태나 테스트 실행 중에는 등록하지 않음)
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -876,6 +881,7 @@ def api_deals_debug():
     return jsonify({
         'success': True,
         'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        'database_configured': bool(DATABASE_URL),
         'boards': report,
     })
 
