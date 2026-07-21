@@ -267,6 +267,35 @@ class DealNotificationTests(unittest.TestCase):
             self.assertEqual(app.scrape_configured_board(board), [{"title": "x"}])
             rss.assert_called_once()
 
+    @patch("app.requests.Session")
+    def test_scrape_board_parses_clien_style_list(self, session_class):
+        response = Mock()
+        response.text = """
+        <div class="contents_jirum">
+          <div class="list_item symph_row">
+            <a class="list_reply" href="#comment">5</a>
+            <a class="list_subject" href="/service/board/jirum/1234">
+              <span class="subject_fixed">티웨이항공 국제선 특가 오픈</span>
+            </a>
+            <span class="timestamp">2026-07-21 09:00</span>
+          </div>
+          <div class="list_item symph_row">
+            <a class="list_subject" href="/service/board/jirum/1235">
+              <span class="subject_fixed">노트북 할인</span>
+            </a>
+            <span class="timestamp">2026-07-21 08:00</span>
+          </div>
+        </div>
+        """
+        response.encoding = "utf-8"
+        session_class.return_value.get.return_value = response
+
+        posts = app.scrape_board("https://www.clien.net/service/board/jirum", "클리앙", "항공")
+
+        self.assertEqual(len(posts), 1)
+        self.assertIn("티웨이항공", posts[0]["title"])
+        self.assertIn("/service/board/jirum/1234", posts[0]["link"])
+
     def test_format_deal_alert_truncates_long_lists(self):
         posts = [_deal(i, f"특가 {i}") for i in range(15)]
         message = app.format_deal_alert(posts)
