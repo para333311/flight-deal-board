@@ -1,6 +1,12 @@
 {
   "deal_boards": [
     {
+      "name": "뽐뿌RSS",
+      "url": "https://www.ppomppu.co.kr/rss.php?id=ppomppu",
+      "type": "rss",
+      "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
       "name": "뽐뿌",
       "url": "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu",
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
