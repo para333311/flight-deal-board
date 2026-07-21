@@ -25,6 +25,12 @@
       "name": "루리웹핫딜",
       "url": "https://bbs.ruliweb.com/market/board/1020",
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
+      "name": "네이버카페",
+      "type": "naver_cafe",
+      "url": "",
+      "keyword": "항공권 특가.항공권 땡처리.제주항공 특가.티웨이 특가.진에어 특가.에어부산 특가"
     }
   ],
   "boards": [
