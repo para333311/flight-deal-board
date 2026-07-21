@@ -139,7 +139,10 @@ def scrape_board(url, name, keyword):
     try:
         session = requests.Session()
         response = session.get(url, headers=get_headers(url), verify=False, timeout=15)
-        response.encoding = 'utf-8'
+        # 서버가 charset을 명시하면 그대로 쓴다 (뽐뿌 등 EUC-KR 사이트 한글 깨짐 방지).
+        # 명시가 없으면 requests 기본값(ISO-8859-1) 대신 내용 기반 추정을 사용한다.
+        if not response.encoding or response.encoding.lower() == 'iso-8859-1':
+            response.encoding = response.apparent_encoding or 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
 
         rows = soup.select('table tbody tr, .board-list tr, .bbs-list tr, .list_type li, .news-list li, .search-result-list li, .list-wrap li')
@@ -853,6 +856,15 @@ def api_deals_debug():
         except Exception as exc:
             entry['posts_found'] = 0
             entry['scrape_error'] = str(exc)
+
+        # 키워드 필터를 끈 원본 수집 결과 (파싱/인코딩 정상 여부 확인용)
+        try:
+            raw_board = dict(board, keyword='')
+            raw_posts = scrape_configured_board(raw_board)
+            entry['raw_posts_found'] = len(raw_posts)
+            entry['raw_titles'] = [p['title'] for p in raw_posts[:5]]
+        except Exception as exc:
+            entry['raw_error'] = str(exc)
         report.append(entry)
 
     return jsonify({
