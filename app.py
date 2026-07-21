@@ -20,7 +20,14 @@ app = Flask(__name__)
 CONFIG_FILE = 'config.json'
 CACHE_FILE = 'cache.json'
 VISITORS_FILE = 'visitors.json'
+SENT_DEALS_FILE = 'sent_deals.json'
+DEALS_CACHE_FILE = 'deals_cache.json'
 ADMIN_PASSWORD = "1111" # 기본 비밀번호
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_MESSAGE_LIMIT = 4096
+DEAL_CHECK_INTERVAL_MINUTES = 30
+MAX_DEALS_PER_ALERT = 10
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
 OPENGOV_HOST = 'opengov.seoul.go.kr'
 OPEN_PORTAL_LIST_URL = 'https://www.open.go.kr/othicInfo/infoList/infoList.do'
@@ -67,6 +74,15 @@ def init_db():
                 date DATE UNIQUE NOT NULL,
                 today_count INTEGER DEFAULT 0,
                 total_count INTEGER DEFAULT 0
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sent_deals (
+                link TEXT PRIMARY KEY,
+                title TEXT,
+                source TEXT,
+                sent_at TIMESTAMP DEFAULT NOW()
             )
         """)
 
@@ -129,7 +145,11 @@ def scrape_board(url, name, keyword):
             rows = soup.select('.title, .subject, .txt_left, .tit')
 
         for row in rows:
-            title_elem = row.select_one('a, .tit, .subject, .title')
+            # 뽐뿌처럼 제목 앞에 분류/댓글 링크가 붙는 게시판은 제목 앵커를 우선 사용
+            title_elem = (
+                row.select_one('a.baseList-title, a.list_subject')
+                or row.select_one('a, .tit, .subject, .title')
+            )
             if not title_elem: continue
 
             title = title_elem.get_text(strip=True)
@@ -148,7 +168,7 @@ def scrape_board(url, name, keyword):
             full_link = urljoin(url, link)
 
             date_val = ""
-            for elem in row.select('td, span, .date, .reg_date, .day'):
+            for elem in row.select('td, span, time, .date, .reg_date, .day'):
                 txt = elem.get_text(strip=True)
                 if re.search(r'\d{2,4}[-./]\d{1,2}[-./]\d{1,2}', txt):
                     date_val = txt
@@ -504,6 +524,169 @@ def background_scrape():
 
     print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 크롤링 완료! (게시판 {len(all_results)}개)")
 
+
+# ==================== 항공 특가 텔레그램 알림 ====================
+
+def send_telegram_message(text):
+    """텔레그램 봇으로 메시지 전송 (4096자 제한에 맞춰 분할 전송)"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        app.logger.warning('텔레그램 미설정: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수를 확인하세요.')
+        return False
+
+    api_url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+    ok = True
+    for i in range(0, len(text), TELEGRAM_MESSAGE_LIMIT):
+        chunk = text[i:i + TELEGRAM_MESSAGE_LIMIT]
+        try:
+            response = requests.post(
+                api_url,
+                json={
+                    'chat_id': TELEGRAM_CHAT_ID,
+                    'text': chunk,
+                    'disable_web_page_preview': True,
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            app.logger.warning('텔레그램 전송 실패: %s', exc)
+            ok = False
+    return ok
+
+
+def claim_new_deals(posts):
+    """아직 알림을 보내지 않은 특가 글만 골라내고, 보낸 것으로 표시한다.
+
+    반환: (새 글 목록, 최초 실행 여부)
+    최초 실행 시에는 기존 글을 전부 '보낸 것'으로만 기록하고 알림은 보내지 않는다.
+    (봇을 처음 켰을 때 옛날 글 수십 개가 한꺼번에 쏟아지는 것을 방지)
+    """
+    if DATABASE_URL:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sent_deals")
+            first_run = cursor.fetchone()[0] == 0
+
+            new_posts = []
+            for post in posts:
+                cursor.execute(
+                    """
+                    INSERT INTO sent_deals (link, title, source)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (link) DO NOTHING
+                    """,
+                    (post['link'], post['title'], post['source']),
+                )
+                if cursor.rowcount and not first_run:
+                    new_posts.append(post)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return new_posts, first_run
+        except Exception as e:
+            print(f"❌ 특가 기록 DB 오류: {e}")
+
+    # 파일 fallback (서버 재시작 시 초기화될 수 있으므로 DB 사용 권장)
+    first_run = not os.path.exists(SENT_DEALS_FILE)
+    seen = set()
+    if not first_run:
+        try:
+            with open(SENT_DEALS_FILE, 'r', encoding='utf-8') as f:
+                seen = set(json.load(f))
+        except Exception:
+            pass
+
+    new_posts = [p for p in posts if p['link'] not in seen]
+    seen.update(p['link'] for p in posts)
+    with open(SENT_DEALS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
+    return ([] if first_run else new_posts), first_run
+
+
+def format_deal_alert(new_posts):
+    """새 특가 글 목록을 텔레그램 메시지 텍스트로 변환한다."""
+    shown = new_posts[:MAX_DEALS_PER_ALERT]
+    lines = [f"✈️ 새 항공 특가 {len(new_posts)}건!"]
+    for post in shown:
+        lines.append("")
+        lines.append(f"🔥 [{post['source']}] {post['title']}")
+        lines.append(post['link'])
+    if len(new_posts) > len(shown):
+        lines.append("")
+        lines.append(f"…외 {len(new_posts) - len(shown)}건")
+    return "\n".join(lines)
+
+
+def check_airline_deals():
+    """특가 게시판을 수집해 새 글을 텔레그램으로 알린다. (스케줄러에서 주기 실행)"""
+    config = load_config()
+    deal_boards = config.get('deal_boards', [])
+    if not deal_boards:
+        return []
+
+    print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 항공 특가 확인 중...")
+
+    posts_by_link = {}
+    for board in deal_boards:
+        for post in scrape_configured_board(board):
+            posts_by_link.setdefault(post['link'], post)
+    posts = sorted(posts_by_link.values(), key=lambda p: p['dt_obj'], reverse=True)
+
+    # 대시보드 확인용 캐시 저장
+    clean_posts = []
+    for p in posts:
+        c = p.copy()
+        c.pop('dt_obj', None)
+        clean_posts.append(c)
+    try:
+        with open(DEALS_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({
+                'success': True,
+                'deals': clean_posts,
+                'updated_at': get_korean_time().strftime('%Y-%m-%d %H:%M:%S'),
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ 특가 캐시 저장 오류: {e}")
+
+    if not posts:
+        print("항공 특가 확인 완료: 수집된 글 없음 (게시판 접근 차단 여부 확인 필요)")
+        return []
+
+    new_posts, first_run = claim_new_deals(posts)
+
+    if first_run:
+        send_telegram_message(
+            "✈️ 제제보드 항공 특가 알림을 시작합니다!\n"
+            f"현재 특가 게시판에 {len(posts)}건이 있고, 앞으로 새 특가가 뜨면 바로 알려드릴게요."
+        )
+        print(f"항공 특가 알림 최초 실행: 기존 {len(posts)}건 기록 완료")
+        return []
+
+    if new_posts:
+        send_telegram_message(format_deal_alert(new_posts))
+        print(f"항공 특가 알림 전송: 새 글 {len(new_posts)}건")
+    else:
+        print("항공 특가 확인 완료: 새 글 없음")
+
+    return new_posts
+
+
+# gunicorn 배포에서도 알림이 돌도록 모듈 로드 시점에 잡을 등록한다.
+# (텔레그램 미설정 상태나 테스트 실행 중에는 등록하지 않음)
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    scheduler.add_job(
+        func=check_airline_deals,
+        trigger="interval",
+        minutes=DEAL_CHECK_INTERVAL_MINUTES,
+        next_run_time=get_korean_time() + timedelta(seconds=30),
+        id='deal_alert_job',
+        name='항공 특가 확인 및 텔레그램 알림',
+        replace_existing=True,
+    )
+
+
 @app.route('/')
 def index():
     config = load_config()
@@ -553,6 +736,47 @@ def refresh_data():
     background_scrape()
     cache = load_cache()
     return jsonify(cache if cache else {'success': False, 'message': 'Refresh failed'})
+
+@app.route('/api/deals')
+def api_deals():
+    """최근 수집된 항공 특가 목록 반환"""
+    if os.path.exists(DEALS_CACHE_FILE):
+        try:
+            with open(DEALS_CACHE_FILE, 'r', encoding='utf-8') as f:
+                return jsonify(json.load(f))
+        except Exception:
+            pass
+    return jsonify({'success': True, 'deals': [], 'updated_at': None})
+
+@app.route('/api/deals/check', methods=['POST'])
+def api_deals_check():
+    """즉시 특가 확인 + 새 글 있으면 텔레그램 전송 (테스트/수동 실행용)"""
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    new_posts = check_airline_deals()
+    return jsonify({
+        'success': True,
+        'new_deals': len(new_posts),
+        'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    })
+
+@app.route('/api/telegram/test', methods=['POST'])
+def api_telegram_test():
+    """텔레그램 봇 연결 테스트 메시지 전송"""
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return jsonify({
+            'success': False,
+            'message': 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수가 설정되지 않았습니다.',
+        })
+
+    ok = send_telegram_message('✅ 제제보드 항공 특가 알림 테스트 메시지입니다!')
+    return jsonify({'success': ok})
 
 @app.route('/api/visitors', methods=['GET', 'POST'])
 def visitors():

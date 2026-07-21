@@ -1,16 +1,22 @@
+import json
+import os
+import tempfile
 import unittest
+from datetime import date, timedelta
 from unittest.mock import Mock, patch
 
 import app
 
 
-NAVER_RESULTS_HTML = """
+RECENT_DATE = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+NAVER_RESULTS_HTML = f"""
 <div class="fds-web-normal-doc-root">
   <a href="https://opengov.seoul.go.kr/sanction/35280361?share=Y">
     남가좌동 227-2번지 일대 신속통합기획 주택재개발사업 후보지 신청 제외 검토
     &gt; 결재문서 &gt; 원문정보 &gt; 정보소통광장
   </a>
-  <p>생산일자 : 2026-01-20, 부서명 : 주거정비과</p>
+  <p>생산일자 : {RECENT_DATE}, 부서명 : 주거정비과</p>
 </div>
 <div class="fds-web-normal-doc-root">
   <a href="https://opengov.seoul.go.kr/sanction/35280361?share=Y">첨부된 문서</a>
@@ -88,7 +94,7 @@ class OpenGovFallbackTests(unittest.TestCase):
             "https://opengov.seoul.go.kr/sanction/35280361",
         )
         self.assertIn("신속통합기획", posts[0]["title"])
-        self.assertEqual(posts[0]["date"], "2026-01-20")
+        self.assertEqual(posts[0]["date"], RECENT_DATE)
         self.assertEqual(session_class.return_value.get.call_count, 2)
 
     @patch("app.scrape_opengov_search_fallback")
@@ -118,6 +124,103 @@ class OpenGovFallbackTests(unittest.TestCase):
         self.assertEqual(app.scrape_configured_board(normal_board), [])
         official_portal.assert_not_called()
         fallback.assert_not_called()
+
+
+def _deal(no, title):
+    return {
+        "title": title,
+        "link": f"https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no={no}",
+        "date": "2026-07-21",
+        "dt_obj": app.parse_date("2026-07-21"),
+        "source": "뽐뿌",
+    }
+
+
+class DealNotificationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        sent_file = os.path.join(self.tmpdir.name, "sent_deals.json")
+        deals_cache = os.path.join(self.tmpdir.name, "deals_cache.json")
+        for target, value in (
+            ("DATABASE_URL", None),
+            ("SENT_DEALS_FILE", sent_file),
+            ("DEALS_CACHE_FILE", deals_cache),
+        ):
+            patcher = patch.object(app, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_first_run_seeds_without_notifying(self):
+        new_posts, first_run = app.claim_new_deals([_deal(1, "제주항공 특가")])
+        self.assertTrue(first_run)
+        self.assertEqual(new_posts, [])
+
+        # 두 번째 실행: 기존 글은 무시하고 새 글만 반환
+        new_posts, first_run = app.claim_new_deals(
+            [_deal(1, "제주항공 특가"), _deal(2, "티웨이 땡처리")]
+        )
+        self.assertFalse(first_run)
+        self.assertEqual([p["title"] for p in new_posts], ["티웨이 땡처리"])
+
+    @patch("app.requests.post")
+    def test_send_telegram_message_splits_long_text(self, post):
+        post.return_value = Mock(raise_for_status=Mock())
+        with patch.object(app, "TELEGRAM_BOT_TOKEN", "token"), patch.object(
+            app, "TELEGRAM_CHAT_ID", "12345"
+        ):
+            self.assertTrue(app.send_telegram_message("가" * 5000))
+        self.assertEqual(post.call_count, 2)
+
+    def test_send_telegram_message_requires_configuration(self):
+        with patch.object(app, "TELEGRAM_BOT_TOKEN", ""), patch.object(
+            app, "TELEGRAM_CHAT_ID", ""
+        ):
+            self.assertFalse(app.send_telegram_message("테스트"))
+
+    @patch("app.send_telegram_message")
+    @patch("app.scrape_configured_board")
+    @patch("app.load_config")
+    def test_check_airline_deals_notifies_only_new_posts(
+        self, load_config, scrape, send
+    ):
+        load_config.return_value = {
+            "deal_boards": [{"name": "뽐뿌", "url": "https://example.com", "keyword": "항공"}]
+        }
+
+        # 최초 실행: 시작 안내만 전송
+        scrape.return_value = [_deal(1, "제주항공 동남아 50% 할인코드")]
+        self.assertEqual(app.check_airline_deals(), [])
+        self.assertEqual(send.call_count, 1)
+        self.assertIn("시작", send.call_args[0][0])
+
+        # 새 글 등장: 특가 알림 전송
+        send.reset_mock()
+        scrape.return_value = [
+            _deal(1, "제주항공 동남아 50% 할인코드"),
+            _deal(2, "티웨이 국제선 특가 오픈"),
+        ]
+        new_posts = app.check_airline_deals()
+        self.assertEqual(len(new_posts), 1)
+        message = send.call_args[0][0]
+        self.assertIn("티웨이 국제선 특가 오픈", message)
+        self.assertIn("no=2", message)
+
+        # 새 글 없음: 알림 없음
+        send.reset_mock()
+        self.assertEqual(app.check_airline_deals(), [])
+        send.assert_not_called()
+
+        # 대시보드용 캐시 저장 확인
+        with open(app.DEALS_CACHE_FILE, encoding="utf-8") as f:
+            cache = json.load(f)
+        self.assertEqual(len(cache["deals"]), 2)
+
+    def test_format_deal_alert_truncates_long_lists(self):
+        posts = [_deal(i, f"특가 {i}") for i in range(15)]
+        message = app.format_deal_alert(posts)
+        self.assertIn("새 항공 특가 15건", message)
+        self.assertIn("외 5건", message)
 
 
 if __name__ == "__main__":
