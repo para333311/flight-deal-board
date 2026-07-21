@@ -939,6 +939,11 @@ def api_deals_debug():
         'success': True,
         'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         'database_configured': bool(DATABASE_URL),
+        # 환경변수 이름 오타 진단용: 관련 변수의 '이름'만 노출한다 (값은 비공개)
+        'env_keys_seen': sorted(
+            k for k in os.environ
+            if 'NAVER' in k.upper() or 'TELEGRAM' in k.upper()
+        ),
         'boards': report,
     })
 
