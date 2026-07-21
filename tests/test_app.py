@@ -235,6 +235,38 @@ class DealNotificationTests(unittest.TestCase):
         self.assertEqual(app.check_airline_deals(), [])
         send.assert_not_called()
 
+    @patch("app.requests.get")
+    def test_scrape_rss_filters_by_keyword(self, get):
+        rss = """<?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0"><channel>
+          <item>
+            <title>[제주항공] 동남아 최대 50% 할인코드 (수수료무료)</title>
+            <link>https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&amp;no=101</link>
+            <pubDate>Tue, 21 Jul 2026 09:00:00 +0900</pubDate>
+          </item>
+          <item>
+            <title>노트북 특가</title>
+            <link>https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&amp;no=102</link>
+            <pubDate>Tue, 21 Jul 2026 08:00:00 +0900</pubDate>
+          </item>
+        </channel></rss>"""
+        get.return_value = Mock(
+            content=rss.encode("utf-8"), raise_for_status=Mock()
+        )
+
+        posts = app.scrape_rss("https://example.com/rss.php?id=ppomppu", "뽐뿌RSS", "항공.티웨이")
+
+        self.assertEqual(len(posts), 1)
+        self.assertIn("제주항공", posts[0]["title"])
+        self.assertEqual(posts[0]["date"], "2026-07-21")
+        self.assertIn("no=101", posts[0]["link"])
+
+    def test_configured_board_routes_rss_type(self):
+        with patch("app.scrape_rss", return_value=[{"title": "x"}]) as rss:
+            board = {"name": "뽐뿌RSS", "url": "https://a.b/rss.php?id=ppomppu", "keyword": "항공"}
+            self.assertEqual(app.scrape_configured_board(board), [{"title": "x"}])
+            rss.assert_called_once()
+
     def test_format_deal_alert_truncates_long_lists(self):
         posts = [_deal(i, f"특가 {i}") for i in range(15)]
         message = app.format_deal_alert(posts)

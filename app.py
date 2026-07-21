@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, render_template, request, jsonify
@@ -359,9 +361,53 @@ def scrape_opengov_search_fallback(name, keyword, limit=30):
     return posts
 
 
+def scrape_rss(url, name, keyword):
+    """RSS 피드에서 글 목록을 가져온다. (뽐뿌 등 HTML 차단 시 우회 경로)"""
+    posts = []
+    try:
+        response = requests.get(url, headers=get_headers(url), verify=False, timeout=15)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+
+        keywords = split_keywords(keyword)
+        for item in root.iter('item'):
+            title = (item.findtext('title') or '').strip()
+            link = (item.findtext('link') or '').strip()
+            if len(title) < 3 or not link:
+                continue
+            if keywords and not any(kw in title for kw in keywords):
+                continue
+
+            pub_date = (item.findtext('pubDate') or '').strip()
+            date_val = ''
+            dt_obj = datetime(1900, 1, 1)
+            if pub_date:
+                try:
+                    dt_obj = parsedate_to_datetime(pub_date).replace(tzinfo=None)
+                    date_val = dt_obj.strftime('%Y-%m-%d')
+                except (TypeError, ValueError):
+                    dt_obj = parse_date(pub_date)
+                    date_val = pub_date
+
+            posts.append({
+                'title': title,
+                'link': link,
+                'date': date_val,
+                'dt_obj': dt_obj,
+                'source': name,
+            })
+
+        posts.sort(key=lambda x: x['dt_obj'], reverse=True)
+    except (requests.RequestException, ET.ParseError) as e:
+        print(f"Error scraping RSS {name}: {e}")
+    return posts
+
+
 def scrape_configured_board(board):
     """게시판을 수집하고 정보소통광장은 공식 포털을 우선 사용한다."""
     keyword = board.get('keyword', '')
+    if board.get('type') == 'rss' or 'rss.php' in board.get('url', ''):
+        return scrape_rss(board['url'], board['name'], keyword)
     if OPENGOV_HOST in board.get('url', ''):
         try:
             posts = scrape_open_portal(board['name'], keyword)
@@ -778,6 +824,41 @@ def api_deals_check():
         'success': True,
         'new_deals': len(new_posts),
         'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    })
+
+@app.route('/api/deals/debug')
+def api_deals_debug():
+    """특가 소스별 수집 상태 진단. 브라우저에서 ?pw=1111 로 확인."""
+    if request.args.get('pw') != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    report = []
+    for board in load_config().get('deal_boards', []):
+        entry = {'name': board.get('name'), 'url': board.get('url')}
+        try:
+            response = requests.get(
+                board['url'], headers=get_headers(board['url']),
+                verify=False, timeout=15,
+            )
+            entry['http_status'] = response.status_code
+            entry['response_bytes'] = len(response.content)
+        except requests.RequestException as exc:
+            entry['http_status'] = None
+            entry['fetch_error'] = str(exc)
+
+        try:
+            posts = scrape_configured_board(board)
+            entry['posts_found'] = len(posts)
+            entry['sample_titles'] = [p['title'] for p in posts[:3]]
+        except Exception as exc:
+            entry['posts_found'] = 0
+            entry['scrape_error'] = str(exc)
+        report.append(entry)
+
+    return jsonify({
+        'success': True,
+        'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        'boards': report,
     })
 
 @app.route('/api/telegram/test', methods=['GET', 'POST'])
