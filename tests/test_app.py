@@ -216,6 +216,25 @@ class DealNotificationTests(unittest.TestCase):
             cache = json.load(f)
         self.assertEqual(len(cache["deals"]), 2)
 
+    @patch("app.send_telegram_message")
+    @patch("app.scrape_configured_board", return_value=[])
+    @patch("app.load_config")
+    def test_check_airline_deals_sends_start_even_with_no_posts(
+        self, load_config, scrape, send
+    ):
+        load_config.return_value = {
+            "deal_boards": [{"name": "뽐뿌", "url": "https://example.com", "keyword": "항공"}]
+        }
+        # 글이 0건이어도 최초 실행 시작 메시지는 나가야 한다 (텔레그램 연결 확인용)
+        self.assertEqual(app.check_airline_deals(), [])
+        self.assertEqual(send.call_count, 1)
+        self.assertIn("시작", send.call_args[0][0])
+
+        # 이후 실행은 시작 메시지를 반복하지 않는다
+        send.reset_mock()
+        self.assertEqual(app.check_airline_deals(), [])
+        send.assert_not_called()
+
     def test_format_deal_alert_truncates_long_lists(self):
         posts = [_deal(i, f"특가 {i}") for i in range(15)]
         message = app.format_deal_alert(posts)
