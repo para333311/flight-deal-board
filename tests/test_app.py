@@ -337,6 +337,61 @@ class DealNotificationTests(unittest.TestCase):
         self.assertIn(f"새 항공 특가 {app.MAX_DEALS_PER_ALERT + 5}건", message)
         self.assertIn("외 5건", message)
 
+    def test_format_deal_alert_max_shown_none_includes_everything(self):
+        posts = [_deal(i, f"특가 {i}") for i in range(app.MAX_DEALS_PER_ALERT + 51)]
+        message = app.format_deal_alert(posts, max_shown=None)
+        self.assertNotIn("외 ", message)
+        for post in posts:
+            self.assertIn(post["title"], message)
+            self.assertIn(post["link"], message)
+
+    def test_split_message_keeps_links_intact(self):
+        # 4096자를 훌쩍 넘는 메시지를 만들어 링크가 중간에 끊기지 않는지 확인
+        posts = [_deal(i, f"아주 긴 항공 특가 제목 테스트 {i} " + "가나다" * 20) for i in range(80)]
+        message = app.format_deal_alert(posts, max_shown=None)
+        chunks = app.split_message_for_telegram(message)
+
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), app.TELEGRAM_MESSAGE_LIMIT)
+
+        # 모든 링크가 어느 한 조각 안에 온전히 존재해야 함
+        for post in posts:
+            self.assertTrue(
+                any(post["link"] in chunk for chunk in chunks),
+                f"링크가 조각 사이에서 끊김: {post['link']}",
+            )
+
+        # 조각을 다시 합치면 원본과 동일 (줄 단위 분할이므로 개행으로 이어 붙임)
+        self.assertEqual("\n".join(chunks), message)
+
+    def test_split_message_short_text_single_chunk(self):
+        self.assertEqual(app.split_message_for_telegram("안녕"), ["안녕"])
+
+    @patch("app.requests.post")
+    def test_flush_deal_digest_sends_all_pending_without_truncation(self, post):
+        post.return_value.raise_for_status = lambda: None
+        pending = []
+        for i in range(app.MAX_DEALS_PER_ALERT + 51):
+            deal = _deal(i, f"특가 {i}")
+            deal.pop("dt_obj", None)
+            pending.append(deal)
+        with open(app.PENDING_DEALS_FILE, "w", encoding="utf-8") as f:
+            json.dump(pending, f, ensure_ascii=False)
+
+        with patch.object(app, "TELEGRAM_BOT_TOKEN", "t"), patch.object(
+            app, "TELEGRAM_CHAT_ID", "c"
+        ):
+            sent = app.flush_deal_digest()
+
+        self.assertEqual(len(sent), len(pending))
+        combined = "".join(
+            call.kwargs["json"]["text"] for call in post.call_args_list
+        )
+        self.assertNotIn("외 ", combined)
+        for deal in pending:
+            self.assertIn(deal["link"], combined)
+
 
 if __name__ == "__main__":
     unittest.main()

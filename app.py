@@ -638,16 +638,47 @@ def background_scrape():
 
 # ==================== 항공 특가 텔레그램 알림 ====================
 
+def split_message_for_telegram(text, limit=TELEGRAM_MESSAGE_LIMIT):
+    """긴 메시지를 텔레그램 4096자 제한에 맞춰 줄 단위로 나눈다.
+
+    글자 수로 뚝 자르면 링크가 중간에 끊겨 클릭할 수 없게 되므로
+    반드시 줄바꿈 경계에서 나눈다. (한 줄이 제한을 넘는 극단적인 경우만 강제 분할)
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = ''
+    for line in text.split('\n'):
+        # 한 줄 자체가 제한을 넘는 경우: 어쩔 수 없이 강제 분할
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ''
+            chunks.append(line[:limit])
+            line = line[limit:]
+
+        candidate = f'{current}\n{line}' if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+
 def send_telegram_message(text):
-    """텔레그램 봇으로 메시지 전송 (4096자 제한에 맞춰 분할 전송)"""
+    """텔레그램 봇으로 메시지 전송 (4096자 제한에 맞춰 줄 단위 분할 전송)"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         app.logger.warning('텔레그램 미설정: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수를 확인하세요.')
         return False
 
     api_url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
     ok = True
-    for i in range(0, len(text), TELEGRAM_MESSAGE_LIMIT):
-        chunk = text[i:i + TELEGRAM_MESSAGE_LIMIT]
+    for chunk in split_message_for_telegram(text):
         try:
             response = requests.post(
                 api_url,
@@ -730,9 +761,13 @@ def claim_new_deals(posts):
     return ([] if first_run else new_posts), first_run
 
 
-def format_deal_alert(new_posts, header=None):
-    """새 특가 글 목록을 텔레그램 메시지 텍스트로 변환한다."""
-    shown = new_posts[:MAX_DEALS_PER_ALERT]
+def format_deal_alert(new_posts, header=None, max_shown=MAX_DEALS_PER_ALERT):
+    """새 특가 글 목록을 텔레그램 메시지 텍스트로 변환한다.
+
+    max_shown=None 이면 전체 글을 모두 포함한다.
+    (전송 시 send_telegram_message가 4096자 단위로 알아서 나눠 보낸다)
+    """
+    shown = new_posts if max_shown is None else new_posts[:max_shown]
     lines = [header or f"✈️ 새 항공 특가 {len(new_posts)}건!"]
     for post in shown:
         lines.append("")
@@ -786,7 +821,9 @@ def flush_deal_digest():
         return []
 
     header = f"✈️ 항공 특가 모음 {len(pending)}건 ({get_korean_time().strftime('%m/%d %H:%M')})"
-    if send_telegram_message(format_deal_alert(pending, header=header)):
+    # 정기 알림은 '…외 N건'으로 자르지 않고 전체를 보낸다.
+    # (긴 메시지는 send_telegram_message가 4096자 단위로 나눠 여러 개로 전송)
+    if send_telegram_message(format_deal_alert(pending, header=header, max_shown=None)):
         with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
             json.dump([], f)
         print(f"정기 특가 알림 전송: {len(pending)}건")
