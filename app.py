@@ -24,6 +24,7 @@ CACHE_FILE = 'cache.json'
 VISITORS_FILE = 'visitors.json'
 SENT_DEALS_FILE = 'sent_deals.json'
 DEALS_CACHE_FILE = 'deals_cache.json'
+PENDING_DEALS_FILE = 'pending_deals.json'
 ADMIN_PASSWORD = "1111" # 기본 비밀번호
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
@@ -32,7 +33,9 @@ NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 NAVER_CAFE_API_URL = 'https://openapi.naver.com/v1/search/cafearticle.json'
 TELEGRAM_MESSAGE_LIMIT = 4096
 DEAL_CHECK_INTERVAL_MINUTES = 30
-MAX_DEALS_PER_ALERT = 10
+MAX_DEALS_PER_ALERT = 15
+# 하루 알림 시각 (한국시간, HH:MM 콤마 구분) — 기본: 오전 9시 / 오후 6시
+DEAL_DIGEST_TIMES = os.environ.get('DEAL_DIGEST_TIMES', '09:00,18:00')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
 OPENGOV_HOST = 'opengov.seoul.go.kr'
 OPEN_PORTAL_LIST_URL = 'https://www.open.go.kr/othicInfo/infoList/infoList.do'
@@ -727,10 +730,10 @@ def claim_new_deals(posts):
     return ([] if first_run else new_posts), first_run
 
 
-def format_deal_alert(new_posts):
+def format_deal_alert(new_posts, header=None):
     """새 특가 글 목록을 텔레그램 메시지 텍스트로 변환한다."""
     shown = new_posts[:MAX_DEALS_PER_ALERT]
-    lines = [f"✈️ 새 항공 특가 {len(new_posts)}건!"]
+    lines = [header or f"✈️ 새 항공 특가 {len(new_posts)}건!"]
     for post in shown:
         lines.append("")
         lines.append(f"🔥 [{post['source']}] {post['title']}")
@@ -739,6 +742,55 @@ def format_deal_alert(new_posts):
         lines.append("")
         lines.append(f"…외 {len(new_posts) - len(shown)}건")
     return "\n".join(lines)
+
+
+def add_pending_deals(posts):
+    """새 특가를 즉시 보내지 않고 다음 정기 알림까지 대기 목록에 모아둔다."""
+    pending = []
+    if os.path.exists(PENDING_DEALS_FILE):
+        try:
+            with open(PENDING_DEALS_FILE, 'r', encoding='utf-8') as f:
+                pending = json.load(f)
+        except Exception:
+            pending = []
+
+    seen = {p['link'] for p in pending}
+    for post in posts:
+        if post['link'] in seen:
+            continue
+        clean = post.copy()
+        clean.pop('dt_obj', None)
+        pending.append(clean)
+        seen.add(post['link'])
+
+    with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(pending, f, ensure_ascii=False, indent=2)
+    return pending
+
+
+def flush_deal_digest():
+    """모아둔 특가를 하루 2회 정기 알림으로 전송한다. (스케줄러 cron 실행)
+
+    모인 글이 없으면 아무것도 보내지 않는다.
+    """
+    pending = []
+    if os.path.exists(PENDING_DEALS_FILE):
+        try:
+            with open(PENDING_DEALS_FILE, 'r', encoding='utf-8') as f:
+                pending = json.load(f)
+        except Exception:
+            pending = []
+
+    if not pending:
+        print("정기 특가 알림: 모인 새 특가 없음 (전송 생략)")
+        return []
+
+    header = f"✈️ 항공 특가 모음 {len(pending)}건 ({get_korean_time().strftime('%m/%d %H:%M')})"
+    if send_telegram_message(format_deal_alert(pending, header=header)):
+        with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f)
+        print(f"정기 특가 알림 전송: {len(pending)}건")
+    return pending
 
 
 def check_airline_deals():
@@ -786,8 +838,9 @@ def check_airline_deals():
         return []
 
     if new_posts:
-        send_telegram_message(format_deal_alert(new_posts))
-        print(f"항공 특가 알림 전송: 새 글 {len(new_posts)}건")
+        # 즉시 보내지 않고 하루 2회 정기 알림 시각까지 모아둔다
+        add_pending_deals(new_posts)
+        print(f"항공 특가 대기 목록 추가: 새 글 {len(new_posts)}건")
     else:
         print("항공 특가 확인 완료: 새 글 없음")
 
@@ -808,9 +861,26 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         minutes=DEAL_CHECK_INTERVAL_MINUTES,
         next_run_time=get_korean_time() + timedelta(seconds=30),
         id='deal_alert_job',
-        name='항공 특가 확인 및 텔레그램 알림',
+        name='항공 특가 수집 (알림은 정기 시각에 모아서)',
         replace_existing=True,
     )
+
+    # 하루 2회 정기 알림 (한국시간)
+    for i, digest_time in enumerate(split_keywords(DEAL_DIGEST_TIMES)):
+        try:
+            hour, minute = digest_time.split(':')
+            scheduler.add_job(
+                func=flush_deal_digest,
+                trigger='cron',
+                hour=int(hour),
+                minute=int(minute),
+                timezone='Asia/Seoul',
+                id=f'deal_digest_job_{i}',
+                name=f'항공 특가 정기 알림 ({digest_time} KST)',
+                replace_existing=True,
+            )
+        except (ValueError, TypeError) as exc:
+            print(f"❌ 정기 알림 시각 형식 오류 ({digest_time}): {exc}")
 
 
 @app.route('/')
@@ -892,6 +962,23 @@ def api_deals_check():
         'success': True,
         'new_deals': len(new_posts),
         'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    })
+
+@app.route('/api/deals/digest', methods=['GET', 'POST'])
+def api_deals_digest():
+    """모아둔 특가를 지금 즉시 전송. 브라우저에서 ?pw=1111 로 실행."""
+    if request.method == 'POST':
+        password = (request.json or {}).get('password')
+    else:
+        password = request.args.get('pw')
+    if password != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    sent = flush_deal_digest()
+    return jsonify({
+        'success': True,
+        'sent_deals': len(sent),
+        'message': f'{len(sent)}건을 텔레그램으로 보냈습니다.' if sent else '모인 새 특가가 없어 보내지 않았습니다.',
     })
 
 @app.route('/api/deals/debug')

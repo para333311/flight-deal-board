@@ -142,10 +142,12 @@ class DealNotificationTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         sent_file = os.path.join(self.tmpdir.name, "sent_deals.json")
         deals_cache = os.path.join(self.tmpdir.name, "deals_cache.json")
+        pending_file = os.path.join(self.tmpdir.name, "pending_deals.json")
         for target, value in (
             ("DATABASE_URL", None),
             ("SENT_DEALS_FILE", sent_file),
             ("DEALS_CACHE_FILE", deals_cache),
+            ("PENDING_DEALS_FILE", pending_file),
         ):
             patcher = patch.object(app, target, value)
             patcher.start()
@@ -178,10 +180,10 @@ class DealNotificationTests(unittest.TestCase):
         ):
             self.assertFalse(app.send_telegram_message("테스트"))
 
-    @patch("app.send_telegram_message")
+    @patch("app.send_telegram_message", return_value=True)
     @patch("app.scrape_configured_board")
     @patch("app.load_config")
-    def test_check_airline_deals_notifies_only_new_posts(
+    def test_check_airline_deals_queues_and_digest_sends(
         self, load_config, scrape, send
     ):
         load_config.return_value = {
@@ -193,21 +195,26 @@ class DealNotificationTests(unittest.TestCase):
         self.assertEqual(app.check_airline_deals(), [])
         send.assert_not_called()
 
-        # 새 글 등장: 특가 알림 전송
-        send.reset_mock()
+        # 새 글 등장: 즉시 보내지 않고 대기 목록에 쌓임
         scrape.return_value = [
             _deal(1, "제주항공 동남아 50% 할인코드"),
             _deal(2, "티웨이 국제선 특가 오픈"),
         ]
         new_posts = app.check_airline_deals()
         self.assertEqual(len(new_posts), 1)
+        send.assert_not_called()
+
+        # 정기 알림 시각: 모인 특가를 묶어서 1회 전송 후 목록 비움
+        sent = app.flush_deal_digest()
+        self.assertEqual(len(sent), 1)
         message = send.call_args[0][0]
+        self.assertIn("항공 특가 모음 1건", message)
         self.assertIn("티웨이 국제선 특가 오픈", message)
         self.assertIn("no=2", message)
 
-        # 새 글 없음: 알림 없음
+        # 다음 정기 알림: 모인 게 없으면 조용히 넘어감
         send.reset_mock()
-        self.assertEqual(app.check_airline_deals(), [])
+        self.assertEqual(app.flush_deal_digest(), [])
         send.assert_not_called()
 
         # 대시보드용 캐시 저장 확인
@@ -325,9 +332,9 @@ class DealNotificationTests(unittest.TestCase):
             self.assertEqual(app.scrape_naver_cafe("네이버카페", "항공권 특가"), [])
 
     def test_format_deal_alert_truncates_long_lists(self):
-        posts = [_deal(i, f"특가 {i}") for i in range(15)]
+        posts = [_deal(i, f"특가 {i}") for i in range(app.MAX_DEALS_PER_ALERT + 5)]
         message = app.format_deal_alert(posts)
-        self.assertIn("새 항공 특가 15건", message)
+        self.assertIn(f"새 항공 특가 {app.MAX_DEALS_PER_ALERT + 5}건", message)
         self.assertIn("외 5건", message)
 
 
