@@ -1170,6 +1170,8 @@ def api_deals_debug():
     return jsonify({
         'success': True,
         'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        # 봇이 실제로 알림을 보내는 대상 chat_id (개인채팅/채널 확인용)
+        'telegram_chat_id': TELEGRAM_CHAT_ID,
         'database_configured': bool(DATABASE_URL),
         # 환경변수 이름 오타 진단용: 관련 변수의 '이름'만 노출한다 (값은 비공개)
         'env_keys_seen': sorted(
