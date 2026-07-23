@@ -94,6 +94,15 @@ def init_db():
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_deals (
+                link TEXT PRIMARY KEY,
+                title TEXT,
+                source TEXT,
+                added_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
         conn.commit()
         cursor.close()
         conn.close()
@@ -795,16 +804,43 @@ def format_deal_alert(new_posts, header=None, max_shown=MAX_DEALS_PER_ALERT):
     return "\n".join(lines)
 
 
-def add_pending_deals(posts):
-    """새 특가를 즉시 보내지 않고 다음 정기 알림까지 대기 목록에 모아둔다."""
-    pending = []
+def _load_pending_from_file():
     if os.path.exists(PENDING_DEALS_FILE):
         try:
             with open(PENDING_DEALS_FILE, 'r', encoding='utf-8') as f:
-                pending = json.load(f)
+                return json.load(f)
         except Exception:
-            pending = []
+            pass
+    return []
 
+
+def add_pending_deals(posts):
+    """새 특가를 즉시 보내지 않고 다음 정기 알림까지 대기 목록에 모아둔다.
+
+    DB가 있으면 pending_deals 테이블에, 없으면 파일에 저장한다.
+    (파일은 무료 서버 재시작/배포 시 초기화되므로 DB 사용을 권장)
+    """
+    if DATABASE_URL:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            for post in posts:
+                cursor.execute(
+                    """
+                    INSERT INTO pending_deals (link, title, source)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (link) DO NOTHING
+                    """,
+                    (post['link'], post['title'], post['source']),
+                )
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return
+        except Exception as e:
+            print(f"❌ 대기 특가 DB 저장 오류: {e}")
+
+    pending = _load_pending_from_file()
     seen = {p['link'] for p in pending}
     for post in posts:
         if post['link'] in seen:
@@ -813,10 +849,8 @@ def add_pending_deals(posts):
         clean.pop('dt_obj', None)
         pending.append(clean)
         seen.add(post['link'])
-
     with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
         json.dump(pending, f, ensure_ascii=False, indent=2)
-    return pending
 
 
 def flush_deal_digest():
@@ -824,13 +858,24 @@ def flush_deal_digest():
 
     모인 글이 없으면 아무것도 보내지 않는다.
     """
+    use_db = bool(DATABASE_URL)
     pending = []
-    if os.path.exists(PENDING_DEALS_FILE):
+    if use_db:
         try:
-            with open(PENDING_DEALS_FILE, 'r', encoding='utf-8') as f:
-                pending = json.load(f)
-        except Exception:
-            pending = []
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                "SELECT link, title, source FROM pending_deals ORDER BY added_at"
+            )
+            pending = [dict(row) for row in cursor.fetchall()]
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"❌ 대기 특가 DB 조회 오류: {e}")
+            use_db = False
+            pending = _load_pending_from_file()
+    else:
+        pending = _load_pending_from_file()
 
     if not pending:
         print("정기 특가 알림: 모인 새 특가 없음 (전송 생략)")
@@ -840,8 +885,22 @@ def flush_deal_digest():
     # 정기 알림은 '…외 N건'으로 자르지 않고 전체를 보낸다.
     # (긴 메시지는 send_telegram_message가 4096자 단위로 나눠 여러 개로 전송)
     if send_telegram_message(format_deal_alert(pending, header=header, max_shown=None)):
-        with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
-            json.dump([], f)
+        if use_db:
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM pending_deals WHERE link = ANY(%s)",
+                    ([p['link'] for p in pending],),
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                print(f"❌ 대기 특가 DB 비우기 오류: {e}")
+        else:
+            with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
         print(f"정기 특가 알림 전송: {len(pending)}건")
     return pending
 
