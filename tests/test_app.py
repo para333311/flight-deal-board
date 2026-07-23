@@ -268,6 +268,27 @@ class DealNotificationTests(unittest.TestCase):
             self.assertEqual(app.scrape_configured_board(board), [{"title": "x"}])
             rss.assert_called_once()
 
+    def test_configured_board_excludes_by_keyword(self):
+        collected = [
+            {"title": "부산출발 세부 5일 특가", "link": "a"},
+            {"title": "인천출발 다낭 항공권 특가", "link": "b"},
+            {"title": "김포 출발 오사카", "link": "c"},
+            {"title": "(무자본)개인 사업 부업 하실분", "link": "d"},
+        ]
+        with patch("app._collect_board_posts", return_value=collected):
+            board = {
+                "name": "t",
+                "url": "https://a.b/rss.php",
+                "keyword": "",
+                "exclude_keyword": "부산출발.부업",
+            }
+            titles = [p["title"] for p in app.scrape_configured_board(board)]
+
+        self.assertIn("인천출발 다낭 항공권 특가", titles)
+        self.assertIn("김포 출발 오사카", titles)
+        self.assertNotIn("부산출발 세부 5일 특가", titles)
+        self.assertNotIn("(무자본)개인 사업 부업 하실분", titles)
+
     @patch("app.requests.Session")
     def test_scrape_board_parses_clien_style_list(self, session_class):
         response = Mock()

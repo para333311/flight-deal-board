@@ -466,7 +466,7 @@ def scrape_naver_cafe(name, keyword):
     return list(posts_by_link.values())
 
 
-def scrape_configured_board(board):
+def _collect_board_posts(board):
     """게시판을 수집하고 정보소통광장은 공식 포털을 우선 사용한다."""
     keyword = board.get('keyword', '')
     if board.get('type') == 'naver_cafe':
@@ -483,6 +483,22 @@ def scrape_configured_board(board):
             return posts
         return scrape_opengov_search_fallback(board['name'], keyword)
     return scrape_board(board['url'], board['name'], keyword)
+
+
+def scrape_configured_board(board):
+    """게시판을 수집한 뒤 제외 키워드가 제목에 있으면 걸러낸다.
+
+    exclude_keyword 예: "부산출발.김해출발.지방출발" — 인천/김포 외 지방
+    출발 특가나 광고성 글을 알림에서 빼기 위해 사용한다.
+    """
+    posts = _collect_board_posts(board)
+    excludes = split_keywords(board.get('exclude_keyword', ''))
+    if excludes:
+        posts = [
+            p for p in posts
+            if not any(x in p.get('title', '') for x in excludes)
+        ]
+    return posts
 
 
 def load_cache():
@@ -839,8 +855,11 @@ def check_airline_deals():
 
     print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 항공 특가 확인 중...")
 
+    global_exclude = config.get('deal_exclude_keyword', '')
     posts_by_link = {}
     for board in deal_boards:
+        if global_exclude and not board.get('exclude_keyword'):
+            board = {**board, 'exclude_keyword': global_exclude}
         for post in scrape_configured_board(board):
             posts_by_link.setdefault(post['link'], post)
     posts = sorted(posts_by_link.values(), key=lambda p: p['dt_obj'], reverse=True)
@@ -1024,8 +1043,12 @@ def api_deals_debug():
     if request.args.get('pw') != ADMIN_PASSWORD:
         return jsonify({'success': False, 'message': 'Password Denied'}), 403
 
+    config = load_config()
+    global_exclude = config.get('deal_exclude_keyword', '')
     report = []
-    for board in load_config().get('deal_boards', []):
+    for board in config.get('deal_boards', []):
+        if global_exclude and not board.get('exclude_keyword'):
+            board = {**board, 'exclude_keyword': global_exclude}
         entry = {'name': board.get('name'), 'url': board.get('url')}
         if board.get('type') == 'naver_cafe':
             entry['api_configured'] = bool(NAVER_CLIENT_ID and NAVER_CLIENT_SECRET)
@@ -1049,9 +1072,9 @@ def api_deals_debug():
             entry['posts_found'] = 0
             entry['scrape_error'] = str(exc)
 
-        # 키워드 필터를 끈 원본 수집 결과 (파싱/인코딩 정상 여부 확인용)
+        # 키워드·제외 필터를 모두 끈 원본 수집 결과 (파싱/인코딩 정상 여부 확인용)
         try:
-            raw_board = dict(board, keyword='')
+            raw_board = dict(board, keyword='', exclude_keyword='')
             raw_posts = scrape_configured_board(raw_board)
             entry['raw_posts_found'] = len(raw_posts)
             entry['raw_titles'] = [p['title'] for p in raw_posts[:5]]
