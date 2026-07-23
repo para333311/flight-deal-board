@@ -34,11 +34,13 @@ NAVER_CAFE_API_URL = 'https://openapi.naver.com/v1/search/cafearticle.json'
 TELEGRAM_MESSAGE_LIMIT = 4096
 DEAL_CHECK_INTERVAL_MINUTES = 30
 MAX_DEALS_PER_ALERT = 15
-# 정기 알림 방식 (한국시간 기준)
-#  - DEAL_DIGEST_INTERVAL_HOURS: N시간마다 정각 알림 (기본 3 → 0,3,6,…,21시)
-#  - DEAL_DIGEST_TIMES: 설정하면 지정한 시각(HH:MM 콤마 구분)에만 알림 (간격보다 우선)
+# 정기 알림 시각 (한국시간). 기본: 낮 시간대에 3시간 간격 (새벽 0/3/6시는 제외)
+#  - DEAL_DIGEST_TIMES: 알림 시각 목록 (HH:MM 콤마 구분). 설정 시 이 시각에만 전송
+#  - DEAL_DIGEST_INTERVAL_HOURS: TIMES를 비우면 N시간마다 정각 전송 (0시 포함)
 DEAL_DIGEST_INTERVAL_HOURS = os.environ.get('DEAL_DIGEST_INTERVAL_HOURS', '3')
-DEAL_DIGEST_TIMES = os.environ.get('DEAL_DIGEST_TIMES', '')
+DEAL_DIGEST_TIMES = os.environ.get(
+    'DEAL_DIGEST_TIMES', '09:00,12:00,15:00,18:00,21:00'
+)
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
 OPENGOV_HOST = 'opengov.seoul.go.kr'
 OPEN_PORTAL_LIST_URL = 'https://www.open.go.kr/othicInfo/infoList/infoList.do'
