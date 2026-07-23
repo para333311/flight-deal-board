@@ -34,8 +34,11 @@ NAVER_CAFE_API_URL = 'https://openapi.naver.com/v1/search/cafearticle.json'
 TELEGRAM_MESSAGE_LIMIT = 4096
 DEAL_CHECK_INTERVAL_MINUTES = 30
 MAX_DEALS_PER_ALERT = 15
-# 하루 알림 시각 (한국시간, HH:MM 콤마 구분) — 기본: 오전 9시 / 오후 6시
-DEAL_DIGEST_TIMES = os.environ.get('DEAL_DIGEST_TIMES', '09:00,18:00')
+# 정기 알림 방식 (한국시간 기준)
+#  - DEAL_DIGEST_INTERVAL_HOURS: N시간마다 정각 알림 (기본 3 → 0,3,6,…,21시)
+#  - DEAL_DIGEST_TIMES: 설정하면 지정한 시각(HH:MM 콤마 구분)에만 알림 (간격보다 우선)
+DEAL_DIGEST_INTERVAL_HOURS = os.environ.get('DEAL_DIGEST_INTERVAL_HOURS', '3')
+DEAL_DIGEST_TIMES = os.environ.get('DEAL_DIGEST_TIMES', '')
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
 OPENGOV_HOST = 'opengov.seoul.go.kr'
 OPEN_PORTAL_LIST_URL = 'https://www.open.go.kr/othicInfo/infoList/infoList.do'
@@ -980,22 +983,43 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         replace_existing=True,
     )
 
-    # 하루 2회 정기 알림 (한국시간)
-    for i, digest_time in enumerate(split_keywords(DEAL_DIGEST_TIMES)):
+    # 정기 알림 (한국시간): 지정 시각(DEAL_DIGEST_TIMES)이 있으면 그 시각에,
+    # 없으면 N시간마다 정각(DEAL_DIGEST_INTERVAL_HOURS, 기본 3)에 전송한다.
+    digest_times = split_keywords(DEAL_DIGEST_TIMES)
+    if digest_times:
+        for i, digest_time in enumerate(digest_times):
+            try:
+                hour, minute = digest_time.split(':')
+                scheduler.add_job(
+                    func=flush_deal_digest,
+                    trigger='cron',
+                    hour=int(hour),
+                    minute=int(minute),
+                    timezone='Asia/Seoul',
+                    id=f'deal_digest_job_{i}',
+                    name=f'항공 특가 정기 알림 ({digest_time} KST)',
+                    replace_existing=True,
+                )
+            except (ValueError, TypeError) as exc:
+                print(f"❌ 정기 알림 시각 형식 오류 ({digest_time}): {exc}")
+    else:
         try:
-            hour, minute = digest_time.split(':')
-            scheduler.add_job(
-                func=flush_deal_digest,
-                trigger='cron',
-                hour=int(hour),
-                minute=int(minute),
-                timezone='Asia/Seoul',
-                id=f'deal_digest_job_{i}',
-                name=f'항공 특가 정기 알림 ({digest_time} KST)',
-                replace_existing=True,
-            )
+            interval = int(DEAL_DIGEST_INTERVAL_HOURS)
+            if not 1 <= interval <= 24:
+                raise ValueError('1~24 사이여야 함')
         except (ValueError, TypeError) as exc:
-            print(f"❌ 정기 알림 시각 형식 오류 ({digest_time}): {exc}")
+            print(f"❌ 정기 알림 간격 형식 오류 ({DEAL_DIGEST_INTERVAL_HOURS}): {exc}")
+            interval = 3
+        scheduler.add_job(
+            func=flush_deal_digest,
+            trigger='cron',
+            hour=f'*/{interval}',
+            minute=0,
+            timezone='Asia/Seoul',
+            id='deal_digest_job',
+            name=f'항공 특가 정기 알림 ({interval}시간마다 KST)',
+            replace_existing=True,
+        )
 
 
 @app.route('/')
