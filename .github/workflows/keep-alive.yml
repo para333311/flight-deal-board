@@ -10,4 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping site
-        run: curl -sS -o /dev/null -w "status=%{http_code}\n" --max-time 60 https://jejeboard.onrender.com/
+        run: |
+          url="https://jejeboard.onrender.com/"
+          for attempt in 1 2 3; do
+            status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 180 "$url" || true)
+            echo "attempt=$attempt status=$status"
+            case "$status" in
+              2??|3??) exit 0 ;;
+            esac
+            if [ "$attempt" -lt 3 ]; then
+              sleep 15
+            fi
+          done
+          echo "::error::Site did not respond successfully after 3 attempts"
+          exit 1
