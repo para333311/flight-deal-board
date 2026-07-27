@@ -223,6 +223,27 @@ class DealNotificationTests(unittest.TestCase):
             cache = json.load(f)
         self.assertEqual(len(cache["deals"]), 2)
 
+    @patch("app.send_telegram_message", return_value=True)
+    def test_digest_drops_already_queued_excluded_deals(self, send):
+        """필터를 넓히기 전에 대기 목록에 쌓인 휴대폰 글은 전송 전에 버린다."""
+        phone = _deal(1, "[성지모아 - 휴대폰 성지 시세표] 플립8 폴드8 사전예약 시작")
+        flight = _deal(2, "[매직뱅크] 2026년 7월 27일 월, 여행 항공")
+        for deal in (phone, flight):
+            deal.pop("dt_obj", None)
+        with open(app.PENDING_DEALS_FILE, "w", encoding="utf-8") as f:
+            json.dump([phone, flight], f, ensure_ascii=False)
+
+        sent = app.flush_deal_digest()
+
+        self.assertEqual([p["title"] for p in sent], [flight["title"]])
+        self.assertNotIn("휴대폰", send.call_args[0][0])
+        # 걸러진 글은 대기 목록에서도 지워져 다음 회차에 다시 나오지 않는다
+        with open(app.PENDING_DEALS_FILE, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), [])
+        send.reset_mock()
+        self.assertEqual(app.flush_deal_digest(), [])
+        send.assert_not_called()
+
     @patch("app.send_telegram_message")
     @patch("app.scrape_configured_board", return_value=[])
     @patch("app.load_config")
