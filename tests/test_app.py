@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import app
@@ -288,6 +289,26 @@ class DealNotificationTests(unittest.TestCase):
         self.assertIn("김포 출발 오사카", titles)
         self.assertNotIn("부산출발 세부 5일 특가", titles)
         self.assertNotIn("(무자본)개인 사업 부업 하실분", titles)
+
+    def test_configured_board_excludes_mobile_phone_posts(self):
+        """네이버카페 검색에 섞여 들어오는 휴대폰 성지/시세표 글을 걸러낸다."""
+        exclude = json.loads(
+            Path(app.__file__).with_name("config.json").read_text(encoding="utf-8")
+        )["deal_exclude_keyword"]
+        collected = [
+            {"title": "[세모지 휴대폰성지 시세표 좌표 내방 S26 아이폰18 Z플립8 폴드8] 폴더블8 사전예약!", "link": "a"},
+            {"title": "[휴대폰 성지 동네빠삭 - 핸드폰성지,시세표,휴대폰싸게사는법] 부천 시세표입니다.", "link": "b"},
+            {"title": "[웨딩 아카이브] 신혼여행 항공권, 언제 끊어야 진짜 저렴할까요?", "link": "c"},
+            {"title": "[매직뱅크] 2026년 7월 27일 월, 여행 항공", "link": "d"},
+        ]
+        with patch("app._collect_board_posts", return_value=collected):
+            board = {"name": "네이버카페", "type": "naver_cafe", "url": "",
+                     "keyword": "", "exclude_keyword": exclude}
+            titles = [p["title"] for p in app.scrape_configured_board(board)]
+
+        self.assertEqual(len(titles), 2)
+        self.assertTrue(all("휴대폰" not in t and "시세표" not in t for t in titles))
+        self.assertIn("[매직뱅크] 2026년 7월 27일 월, 여행 항공", titles)
 
     @patch("app.requests.Session")
     def test_scrape_board_parses_clien_style_list(self, session_class):
