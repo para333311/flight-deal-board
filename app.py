@@ -499,20 +499,33 @@ def _collect_board_posts(board):
     return scrape_board(board['url'], board['name'], keyword)
 
 
+def drop_excluded_posts(posts, exclude_keyword=None):
+    """제목에 제외 키워드가 들어 있는 글을 걸러낸다.
+
+    exclude_keyword를 주지 않으면 설정의 전역 deal_exclude_keyword를 쓴다.
+    수집 시점뿐 아니라 대기 목록 저장/전송 시점에도 적용해, 필터를 넓히기
+    전에 이미 쌓인 글(휴대폰 시세표 등)이 뒤늦게 전송되지 않게 한다.
+    """
+    if exclude_keyword is None:
+        exclude_keyword = load_config().get('deal_exclude_keyword', '')
+    excludes = split_keywords(exclude_keyword)
+    if not excludes:
+        return list(posts)
+    return [
+        p for p in posts
+        if not any(x in (p.get('title') or '') for x in excludes)
+    ]
+
+
 def scrape_configured_board(board):
     """게시판을 수집한 뒤 제외 키워드가 제목에 있으면 걸러낸다.
 
     exclude_keyword 예: "부산출발.김해출발.지방출발" — 인천/김포 외 지방
     출발 특가나 광고성 글을 알림에서 빼기 위해 사용한다.
     """
-    posts = _collect_board_posts(board)
-    excludes = split_keywords(board.get('exclude_keyword', ''))
-    if excludes:
-        posts = [
-            p for p in posts
-            if not any(x in p.get('title', '') for x in excludes)
-        ]
-    return posts
+    return drop_excluded_posts(
+        _collect_board_posts(board), board.get('exclude_keyword', ''),
+    )
 
 
 def load_cache():
@@ -825,6 +838,9 @@ def add_pending_deals(posts):
     DB가 있으면 pending_deals 테이블에, 없으면 파일에 저장한다.
     (파일은 무료 서버 재시작/배포 시 초기화되므로 DB 사용을 권장)
     """
+    posts = drop_excluded_posts(posts)
+    if not posts:
+        return
     if DATABASE_URL:
         try:
             conn = get_db_connection()
@@ -858,6 +874,33 @@ def add_pending_deals(posts):
         json.dump(pending, f, ensure_ascii=False, indent=2)
 
 
+def _remove_pending_links(links, use_db):
+    """대기 목록에서 지정한 링크를 지운다. (전송 완료 또는 제외 처리)"""
+    links = list(links)
+    if not links:
+        return
+    if use_db:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM pending_deals WHERE link = ANY(%s)", (links,),
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return
+        except Exception as e:
+            print(f"❌ 대기 특가 DB 비우기 오류: {e}")
+            return
+
+    remaining = [
+        p for p in _load_pending_from_file() if p.get('link') not in set(links)
+    ]
+    with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(remaining, f, ensure_ascii=False, indent=2)
+
+
 def flush_deal_digest():
     """모아둔 특가를 하루 2회 정기 알림으로 전송한다. (스케줄러 cron 실행)
 
@@ -882,6 +925,15 @@ def flush_deal_digest():
     else:
         pending = _load_pending_from_file()
 
+    # 제외 키워드를 넓히기 전에 쌓인 글은 여기서 걸러 목록에서도 지운다.
+    kept = drop_excluded_posts(pending)
+    if len(kept) != len(pending):
+        kept_links = {p.get('link') for p in kept}
+        dropped = [p['link'] for p in pending if p.get('link') not in kept_links]
+        print(f"정기 특가 알림: 제외 키워드로 걸러낸 대기 글 {len(dropped)}건")
+        _remove_pending_links(dropped, use_db)
+        pending = kept
+
     if not pending:
         print("정기 특가 알림: 모인 새 특가 없음 (전송 생략)")
         return []
@@ -890,22 +942,7 @@ def flush_deal_digest():
     # 정기 알림은 '…외 N건'으로 자르지 않고 전체를 보낸다.
     # (긴 메시지는 send_telegram_message가 4096자 단위로 나눠 여러 개로 전송)
     if send_telegram_message(format_deal_alert(pending, header=header, max_shown=None)):
-        if use_db:
-            try:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "DELETE FROM pending_deals WHERE link = ANY(%s)",
-                    ([p['link'] for p in pending],),
-                )
-                conn.commit()
-                cursor.close()
-                conn.close()
-            except Exception as e:
-                print(f"❌ 대기 특가 DB 비우기 오류: {e}")
-        else:
-            with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
-                json.dump([], f)
+        _remove_pending_links([p['link'] for p in pending], use_db)
         print(f"정기 특가 알림 전송: {len(pending)}건")
     return pending
 
