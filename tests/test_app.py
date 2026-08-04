@@ -312,7 +312,7 @@ class DealNotificationTests(unittest.TestCase):
         self.assertNotIn("(무자본)개인 사업 부업 하실분", titles)
 
     def test_configured_board_excludes_mobile_phone_posts(self):
-        """네이버카페 검색에 섞여 들어오는 휴대폰 성지/시세표 글을 걸러낸다."""
+        """휴대폰 성지/시세표 글을 걸러낸다."""
         exclude = json.loads(
             Path(app.__file__).with_name("config.json").read_text(encoding="utf-8")
         )["deal_exclude_keyword"]
@@ -323,8 +323,7 @@ class DealNotificationTests(unittest.TestCase):
             {"title": "[매직뱅크] 2026년 7월 27일 월, 여행 항공", "link": "d"},
         ]
         with patch("app._collect_board_posts", return_value=collected):
-            board = {"name": "네이버카페", "type": "naver_cafe", "url": "",
-                     "keyword": "", "exclude_keyword": exclude}
+            board = {"name": "t", "url": "https://a.b", "keyword": "", "exclude_keyword": exclude}
             titles = [p["title"] for p in app.scrape_configured_board(board)]
 
         self.assertEqual(len(titles), 2)
@@ -359,40 +358,6 @@ class DealNotificationTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertIn("티웨이항공", posts[0]["title"])
         self.assertIn("/service/board/jirum/1234", posts[0]["link"])
-
-    @patch("app.requests.get")
-    def test_scrape_naver_cafe_uses_open_api(self, get):
-        get.return_value = Mock(
-            raise_for_status=Mock(),
-            json=Mock(return_value={
-                "items": [
-                    {
-                        "title": "<b>제주항공</b> 동남아 특가 &quot;반값&quot;",
-                        "link": "https://cafe.naver.com/x/123",
-                        "cafename": "스마트컨슈머",
-                    },
-                    {
-                        "title": "제주항공 동남아 특가 중복",
-                        "link": "https://cafe.naver.com/x/123",
-                        "cafename": "다른카페",
-                    },
-                ]
-            }),
-        )
-        with patch.object(app, "NAVER_CLIENT_ID", "id"), patch.object(
-            app, "NAVER_CLIENT_SECRET", "secret"
-        ):
-            posts = app.scrape_naver_cafe("네이버카페", "항공권 특가")
-
-        self.assertEqual(len(posts), 1)
-        self.assertEqual(posts[0]["title"], '[스마트컨슈머] 제주항공 동남아 특가 "반값"')
-        self.assertEqual(posts[0]["link"], "https://cafe.naver.com/x/123")
-
-    def test_scrape_naver_cafe_without_keys_returns_empty(self):
-        with patch.object(app, "NAVER_CLIENT_ID", ""), patch.object(
-            app, "NAVER_CLIENT_SECRET", ""
-        ):
-            self.assertEqual(app.scrape_naver_cafe("네이버카페", "항공권 특가"), [])
 
     def test_format_deal_alert_truncates_long_lists(self):
         posts = [_deal(i, f"특가 {i}") for i in range(app.MAX_DEALS_PER_ALERT + 5)]
