@@ -1,36 +1,392 @@
 {
-  "deal_exclude_keyword": "부산출발.김해출발.대구출발.광주출발.청주출발.무안출발.양양출발.제주출발.울산출발.여수출발.포항출발.원주출발.군산출발.지방출발.부산 출발.김해 출발.대구 출발.김해공항.대구공항.부산발.대구발.광주발.청주발.창업.부업.소상공인.재택.대출.투잡.분양.갭투자.보험.휴대폰.핸드폰.스마트폰.알뜰폰.폰성지.자급제.시세표.아이폰.갤럭시.폴더블.폴드.플립.번호이동.기기변경.공시지원금.요금제.통신사.유심",
+  "deal_exclude_keyword": "부산출발.김해출발.대구출발.광주출발.청주출발.무안출발.양양출발.제주출발.울산출발.여수출발.포항출발.원주출발.군산출발.지방출발.부산 출발.김해 출발.대구 출발.김해공항.대구공항.부산발.대구발.광주발.청주발.창업.부업.소상공인.재택.대출.투잡.분양.갭투자.보험.휴대폰.핸드폰.스마트폰.알뜰폰.폰성지.자급제.시세표.아이폰.갤럭시.폴더블.폴드.플립.번호이동.기기변경.공시지원금.요금제.통신사.유심.호텔.숙박.패키지.렌터카.렌트카.eSIM.이심.면세.카드발급.환전.수하물.기내식.후기.질문.양도.광고.체험단",
   "deal_boards": [
     {
+      "id": "ppomppu_rss",
       "name": "뽐뿌RSS",
-      "url": "https://www.ppomppu.co.kr/rss.php?id=ppomppu",
       "type": "rss",
+      "url": "https://www.ppomppu.co.kr/rss.php?id=ppomppu",
+      "enabled": true,
+      "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
     {
+      "id": "ppomppu",
       "name": "뽐뿌",
+      "type": "html",
       "url": "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu",
+      "enabled": true,
+      "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
     {
+      "id": "ppomppu4",
       "name": "해외뽐뿌",
+      "type": "html",
       "url": "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu4",
+      "enabled": true,
+      "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
     {
+      "id": "clien_jirum",
       "name": "클리앙알뜰구매",
+      "type": "html",
       "url": "https://www.clien.net/service/board/jirum",
+      "enabled": true,
+      "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
     {
+      "id": "ruliweb_hotdeal",
       "name": "루리웹핫딜",
+      "type": "html",
       "url": "https://bbs.ruliweb.com/market/board/1020",
+      "enabled": true,
+      "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
     {
-      "name": "알구몬",
-      "url": "https://algumon.com/",
+      "id": "google_news_flight_deals",
+      "name": "GoogleNews_항공권특가",
+      "type": "rss",
+      "url": "https://news.google.com/rss/search?q=%22%ED%95%AD%EA%B3%B5%EA%B6%8C%20%ED%8A%B9%EA%B0%80%22%20OR%20%22%EC%B0%9C%ED%8A%B9%EA%B0%80%22%20OR%20%22%EC%A7%84%EB%A7%88%EC%BC%93%22%20OR%20%22%EB%95%A1%EC%B2%98%EB%A6%AC%20%ED%95%AD%EA%B3%B5%EA%B6%8C%22&hl=ko&gl=KR&ceid=KR%3Ako",
+      "enabled": true,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "ppomppu4_zboard_rss",
+      "name": "뽐뿌_해외뽐뿌RSS",
+      "type": "rss",
+      "url": "https://www.ppomppu.co.kr/zboard/rss.php?id=ppomppu4",
+      "enabled": true,
+      "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
+      "id": "ppomppu_zboard_rss",
+      "name": "뽐뿌_뽐뿌게시판RSS(zboard)",
+      "type": "rss",
+      "url": "https://www.ppomppu.co.kr/zboard/rss.php?id=ppomppu",
+      "enabled": true,
+      "priority": 5,
+      "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
+      "id": "clien_jirum_rss",
+      "name": "클리앙_알뜰구매RSS",
+      "type": "rss",
+      "url": "https://www.clien.net/service/rss/board/jirum",
+      "enabled": true,
+      "priority": 5,
+      "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
+      "id": "algumon_search",
+      "name": "알구몬_항공권검색",
+      "type": "html",
+      "url": "https://algumon.com/search/%ED%95%AD%EA%B3%B5%EA%B6%8C",
+      "enabled": true,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "koreanair_event",
+      "name": "대한항공",
+      "type": "html",
+      "url": "https://www.koreanair.com/kr/ko/promotion/list",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "asiana_event",
+      "name": "아시아나항공",
+      "type": "html",
+      "url": "https://flyasiana.com/C/KR/KO/event/list",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "jejuair_event",
+      "name": "제주항공",
+      "type": "html",
+      "url": "https://www.jejuair.net/ko/event/eventList.do",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "jinair_event",
+      "name": "진에어",
+      "type": "html",
+      "url": "https://www.jinair.com/promotion/eventList",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "twayair_event",
+      "name": "티웨이항공",
+      "type": "html",
+      "url": "https://www.twayair.com/app/promotion/event/retrieveEventList",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "airbusan_event",
+      "name": "에어부산",
+      "type": "html",
+      "url": "https://www.airbusan.com/content/common/customercenter/event",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "airseoul_event",
+      "name": "에어서울",
+      "type": "html",
+      "url": "https://flyairseoul.com/CW/ko/event/eventList.do",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "airpremia_event",
+      "name": "에어프레미아",
+      "type": "html",
+      "url": "https://www.airpremia.com/kr/ko/event",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "aerok_event",
+      "name": "에어로케이",
+      "type": "html",
+      "url": "https://www.aerok.com/kr/event",
+      "enabled": true,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "fmkorea_hotdeal",
+      "name": "에펨코리아_핫딜",
+      "type": "html",
+      "url": "https://www.fmkorea.com/hotdeal",
+      "enabled": false,
+      "priority": 4,
+      "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
+      "id": "theqoo_hotdeal",
+      "name": "더쿠_핫딜",
+      "type": "html",
+      "url": "https://theqoo.net/hot",
+      "enabled": false,
+      "priority": 4,
+      "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
+    },
+    {
+      "id": "secretflying",
+      "name": "SecretFlying",
+      "type": "rss",
+      "url": "https://www.secretflying.com/feed/",
+      "enabled": false,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "theflightdeal",
+      "name": "TheFlightDeal",
+      "type": "rss",
+      "url": "https://www.theflightdeal.com/feed/",
+      "enabled": false,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "fly4free",
+      "name": "Fly4free",
+      "type": "rss",
+      "url": "https://www.fly4free.com/feed/",
+      "enabled": false,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "traveldealz",
+      "name": "TravelDealz",
+      "type": "rss",
+      "url": "https://travel-dealz.com/feed/",
+      "enabled": false,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "thriftytraveler",
+      "name": "ThriftyTraveler_FlightDeals",
+      "type": "rss",
+      "url": "https://thriftytraveler.com/category/flight-deals/feed/",
+      "enabled": false,
+      "priority": 6,
+      "keyword": ""
+    },
+    {
+      "id": "peach_event",
+      "name": "Peach",
+      "type": "html",
+      "url": "https://www.flypeach.com/kr/lm/st/specials",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "zipair_event",
+      "name": "ZIPAIR",
+      "type": "html",
+      "url": "https://www.zipair.net/ko/notification",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "airasia_event",
+      "name": "AirAsia",
+      "type": "html",
+      "url": "https://www.airasia.com/deals",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "scoot_event",
+      "name": "Scoot",
+      "type": "html",
+      "url": "https://www.flyscoot.com/en/promotions",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "vietjet_event",
+      "name": "Vietjet",
+      "type": "html",
+      "url": "https://www.vietjetair.com/en/promotions",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "cebupacific_event",
+      "name": "CebuPacific",
+      "type": "html",
+      "url": "https://www.cebupacificair.com/en-PH/pages/deals",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "hkexpress_event",
+      "name": "HKExpress",
+      "type": "html",
+      "url": "https://www.hkexpress.com/en-hk/deals/",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "cathaypacific_event",
+      "name": "CathayPacific",
+      "type": "html",
+      "url": "https://www.cathaypacific.com/cx/ko_KR/offers.html",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "singaporeair_event",
+      "name": "SingaporeAirlines",
+      "type": "html",
+      "url": "https://www.singaporeair.com/ko_KR/kr/plan-travel/promotions/flight-promotions/",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "qatarairways_event",
+      "name": "QatarAirways",
+      "type": "html",
+      "url": "https://www.qatarairways.com/ko-kr/offers.html",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "emirates_event",
+      "name": "Emirates",
+      "type": "html",
+      "url": "https://www.emirates.com/kr/korean/special-offers/",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "turkishairlines_event",
+      "name": "TurkishAirlines",
+      "type": "html",
+      "url": "https://www.turkishairlines.com/en-kr/flights/flight-deals/",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "finnair_event",
+      "name": "Finnair",
+      "type": "html",
+      "url": "https://www.finnair.com/kr-en/flight-offers",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "etihad_event",
+      "name": "Etihad",
+      "type": "html",
+      "url": "https://www.etihad.com/en-kr/book/special-offers",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "evaair_event",
+      "name": "EVA_Air",
+      "type": "html",
+      "url": "https://www.evaair.com/ko-kr/promotions/",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "starlux_event",
+      "name": "STARLUX",
+      "type": "html",
+      "url": "https://www.starlux-airlines.com/ko-KR/promotions",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
+    },
+    {
+      "id": "chinaairlines_event",
+      "name": "ChinaAirlines",
+      "type": "html",
+      "url": "https://www.china-airlines.com/kr/ko/discover/promotion/current-offers",
+      "enabled": false,
+      "priority": 8,
+      "keyword": ""
     }
   ],
   "boards": [
@@ -89,5 +445,6 @@
       "url": "https://www.gangdong.go.kr/web/newportal/bbs/b_111",
       "keyword": ""
     }
-  ]
+  ],
+  "deal_include_keyword": "항공권.항공.왕복.편도.특가.할인.프로모션.얼리버드.타임세일.땡처리.오픈특가.좌석특가.찜특가.진마켓.메가세일.슈퍼세일.세일.쿠폰.마일리지.비즈니스 특가.ICN.GMP.PUS.CJU.SEL.Seoul.Korea.도쿄.오사카.후쿠오카.삿포로.오키나와.나고야.타이베이.홍콩.마카오.방콕.치앙마이.다낭.나트랑.호치민.하노이.세부.마닐라.싱가포르.쿠알라룸푸르.발리.괌.사이판.하와이.LA.뉴욕.파리.런던.로마.바르셀로나"
 }
