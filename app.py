@@ -2,12 +2,13 @@ import json
 import os
 import re
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, render_template, request, jsonify
 from datetime import date, datetime, timedelta
-from urllib.parse import urlencode, urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 import urllib3
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
@@ -29,8 +30,17 @@ ADMIN_PASSWORD = "1111" # 기본 비밀번호
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 TELEGRAM_MESSAGE_LIMIT = 4096
-DEAL_CHECK_INTERVAL_MINUTES = 30
-MAX_DEALS_PER_ALERT = 15
+DEAL_CHECK_INTERVAL_MINUTES = int(os.environ.get('DEAL_CHECK_INTERVAL_MINUTES', '30'))
+# 한 번의 수집 회차(check_airline_deals)에서 대기 목록에 새로 추가하는 특가 상한.
+# 소스를 늘리다 보면(특히 처음 켜는 공식 이벤트 페이지) 한 회차에 수십~수백 건이
+# 한꺼번에 "새 글"로 잡힐 수 있어 폭주 방지용으로 둔다. 상한을 넘긴 나머지는
+# sent_deals에 기록하지 않고 그대로 남겨둬 다음 회차(기본 30분 뒤)에 다시
+# 후보로 검토된다 — 유실이 아니라 이월이다.
+DEAL_MAX_ALERTS_PER_RUN = int(os.environ.get('DEAL_MAX_ALERTS_PER_RUN', '20'))
+# 소스별 병렬 수집 동시 실행 수. 소스가 많아져도 한 회차 전체 소요 시간을
+# 묶어두기 위함이며, 소스 하나가 타임아웃(15초)이 나도 다른 소스 수집은
+# 그대로 진행된다.
+DEAL_FETCH_CONCURRENCY = int(os.environ.get('DEAL_FETCH_CONCURRENCY', '5'))
 # 정기 알림 시각 (한국시간). 기본: 낮 시간대에 3시간 간격 (새벽 0/3/6시는 제외)
 #  - DEAL_DIGEST_TIMES: 알림 시각 목록 (HH:MM 콤마 구분). 설정 시 이 시각에만 전송
 #  - DEAL_DIGEST_INTERVAL_HOURS: TIMES를 비우면 N시간마다 정각 전송 (0시 포함)
@@ -38,6 +48,19 @@ DEAL_DIGEST_INTERVAL_HOURS = os.environ.get('DEAL_DIGEST_INTERVAL_HOURS', '3')
 DEAL_DIGEST_TIMES = os.environ.get(
     'DEAL_DIGEST_TIMES', '09:00,12:00,15:00,18:00,21:00'
 )
+MAX_DEALS_PER_ALERT = 15
+# 제목에 있으면 특가 점수에 가산점을 주는 단어들. deal_boards의 priority와
+# 합산해 claim_new_deals()가 상한을 넘길 때 무엇을 먼저 보낼지 정렬하는 데만 쓴다.
+DEAL_BONUS_KEYWORDS = (
+    '특가', '할인', '프로모션', '얼리버드', '타임세일', '땡처리', '오픈특가',
+    '좌석특가', '찜특가', '진마켓', '메가세일', '슈퍼세일', '왕복', '편도',
+)
+# canonicalize_url()에서 제거하는 추적용 쿼리 파라미터 (동일 글이 utm 값만
+# 달라 다른 링크로 취급되어 중복 알림이 나가는 것을 막는다)
+TRACKING_QUERY_PARAMS = {
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+    'fbclid', 'gclid',
+}
 DATABASE_URL = os.environ.get('DATABASE_URL')  # Render에서 자동으로 제공
 OPENGOV_HOST = 'opengov.seoul.go.kr'
 OPEN_PORTAL_LIST_URL = 'https://www.open.go.kr/othicInfo/infoList/infoList.do'
@@ -104,6 +127,11 @@ def init_db():
                 added_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        # 기존 배포에 이미 pending_deals 테이블이 있으면 CREATE TABLE IF NOT
+        # EXISTS로는 새 컬럼이 추가되지 않으므로 별도로 보강한다.
+        cursor.execute(
+            "ALTER TABLE pending_deals ADD COLUMN IF NOT EXISTS matched_keywords TEXT"
+        )
 
         conn.commit()
         cursor.close()
@@ -151,6 +179,39 @@ def split_keywords(keyword):
     )
 
 
+def canonicalize_url(url):
+    """추적용 쿼리 파라미터를 제거하고 URL을 정규화해 dedupe 키로 쓴다.
+
+    같은 글이 utm_source 등 파라미터만 다른 링크로 여러 소스(RSS/HTML,
+    공유 링크 등)에 실려도 동일한 키로 모이도록 한다.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        query = sorted(
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if k not in TRACKING_QUERY_PARAMS
+        )
+        path = parts.path.rstrip('/') or '/'
+        return urlunsplit((parts.scheme, parts.netloc.lower(), path, urlencode(query), ''))
+    except ValueError:
+        return url
+
+
+def compute_deal_score(post, board):
+    """claim_new_deals가 상한 초과 시 무엇을 먼저 보낼지 정하는 정렬 점수.
+
+    board의 priority(공식 이벤트 페이지일수록 높게 설정)에 제목의 특가성
+    단어 가산점을 더한다. 알림 표시 순서에는 관여하지 않고, 오직 회차당
+    상한(DEAL_MAX_ALERTS_PER_RUN)을 넘겼을 때 우선순위를 매기는 데만 쓴다.
+    """
+    score = int(board.get('priority') or 0)
+    title = post.get('title') or ''
+    score += sum(1 for kw in DEAL_BONUS_KEYWORDS if kw in title)
+    return score
+
+
 def scrape_board(url, name, keyword):
     posts = []
     try:
@@ -162,48 +223,75 @@ def scrape_board(url, name, keyword):
             response.encoding = response.apparent_encoding or 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
 
+        keywords = split_keywords(keyword)
         rows = soup.select('table tbody tr, .board-list tr, .bbs-list tr, .list_type li, .news-list li, .search-result-list li, .list-wrap li, .list_item')
         if not rows:
             rows = soup.select('.title, .subject, .txt_left, .tit')
 
-        for row in rows:
-            # 뽐뿌/클리앙/루리웹처럼 제목 앞에 분류·댓글 링크가 붙는 게시판은
-            # 제목 앵커를 우선 사용
-            title_elem = (
-                row.select_one('a.baseList-title, a.list_subject, a.deco')
-                or row.select_one('a, .tit, .subject, .title')
-            )
-            if not title_elem: continue
+        if rows:
+            for row in rows:
+                # 뽐뿌/클리앙/루리웹처럼 제목 앞에 분류·댓글 링크가 붙는 게시판은
+                # 제목 앵커를 우선 사용
+                title_elem = (
+                    row.select_one('a.baseList-title, a.list_subject, a.deco')
+                    or row.select_one('a, .tit, .subject, .title')
+                )
+                if not title_elem: continue
 
-            title = title_elem.get_text(strip=True)
-            if len(title) < 3: continue
+                title = title_elem.get_text(strip=True)
+                if len(title) < 3: continue
 
-            # 키워드 필터링 (여러 키워드 지원: OR 조건)
-            keywords = split_keywords(keyword)
-            if keywords and not any(kw in title for kw in keywords):
-                continue
+                # 키워드 필터링 (여러 키워드 지원: OR 조건)
+                matched = [kw for kw in keywords if kw in title]
+                if keywords and not matched:
+                    continue
 
-            link = title_elem.get('href', '')
-            if not link or '#' in link or 'javascript' in link:
-                parent_a = row.find_parent('a') or row.find('a')
-                if parent_a: link = parent_a.get('href', '')
+                link = title_elem.get('href', '')
+                if not link or '#' in link or 'javascript' in link:
+                    parent_a = row.find_parent('a') or row.find('a')
+                    if parent_a: link = parent_a.get('href', '')
+                if not link:
+                    continue
 
-            full_link = urljoin(url, link)
+                date_val = ""
+                for elem in row.select('td, span, time, .date, .reg_date, .day'):
+                    txt = elem.get_text(strip=True)
+                    if re.search(r'\d{2,4}[-./]\d{1,2}[-./]\d{1,2}', txt):
+                        date_val = txt
+                        break
 
-            date_val = ""
-            for elem in row.select('td, span, time, .date, .reg_date, .day'):
-                txt = elem.get_text(strip=True)
-                if re.search(r'\d{2,4}[-./]\d{1,2}[-./]\d{1,2}', txt):
-                    date_val = txt
-                    break
-
-            posts.append({
-                'title': title,
-                'link': full_link,
-                'date': date_val,
-                'dt_obj': parse_date(date_val),
-                'source': name
-            })
+                posts.append({
+                    'title': title,
+                    'link': canonicalize_url(urljoin(url, link)),
+                    'date': date_val,
+                    'dt_obj': parse_date(date_val),
+                    'source': name,
+                    'matched_keywords': matched,
+                })
+        else:
+            # 알려진 목록/테이블 구조가 하나도 없는 페이지(공식 이벤트 페이지 등)를
+            # 위한 최후 수단: 페이지의 모든 <a> 태그 텍스트를 키워드로 매칭한다.
+            # 날짜 정보는 얻을 수 없어 최신순 정렬에서 항상 뒤로 밀린다.
+            seen_links = set()
+            for anchor in soup.find_all('a', href=True):
+                title = anchor.get_text(strip=True)
+                if len(title) < 3:
+                    continue
+                matched = [kw for kw in keywords if kw in title]
+                if keywords and not matched:
+                    continue
+                link = canonicalize_url(urljoin(url, anchor['href']))
+                if 'javascript' in link or link in seen_links:
+                    continue
+                seen_links.add(link)
+                posts.append({
+                    'title': title,
+                    'link': link,
+                    'date': '',
+                    'dt_obj': datetime(1900, 1, 1),
+                    'source': name,
+                    'matched_keywords': matched,
+                })
 
         posts.sort(key=lambda x: x['dt_obj'], reverse=True)
 
@@ -396,7 +484,8 @@ def scrape_rss(url, name, keyword):
             link = (item.findtext('link') or '').strip()
             if len(title) < 3 or not link:
                 continue
-            if keywords and not any(kw in title for kw in keywords):
+            matched = [kw for kw in keywords if kw in title]
+            if keywords and not matched:
                 continue
 
             pub_date = (item.findtext('pubDate') or '').strip()
@@ -412,10 +501,11 @@ def scrape_rss(url, name, keyword):
 
             posts.append({
                 'title': title,
-                'link': link,
+                'link': canonicalize_url(link),
                 'date': date_val,
                 'dt_obj': dt_obj,
                 'source': name,
+                'matched_keywords': matched,
             })
 
         posts.sort(key=lambda x: x['dt_obj'], reverse=True)
@@ -681,12 +771,17 @@ def send_telegram_message(text):
     return ok
 
 
-def claim_new_deals(posts):
+def claim_new_deals(posts, max_new=None):
     """아직 알림을 보내지 않은 특가 글만 골라내고, 보낸 것으로 표시한다.
 
     반환: (새 글 목록, 최초 실행 여부)
     최초 실행 시에는 기존 글을 전부 '보낸 것'으로만 기록하고 알림은 보내지 않는다.
     (봇을 처음 켰을 때 옛날 글 수십 개가 한꺼번에 쏟아지는 것을 방지)
+
+    max_new를 주면 이번 회차에 최대 그만큼만 '보낸 것'으로 확정하고 넘치는
+    나머지는 아예 건드리지 않는다 — sent_deals/파일에 기록되지 않으므로
+    유실이 아니라 다음 회차에 다시 후보로 검토되는 '이월'이다. posts는
+    호출 쪽(check_airline_deals)에서 우선순위가 높은 순으로 정렬해 넘긴다.
     """
     # 최초 실행 여부는 글 개수가 아니라 별도 표식(__seeded__)으로 판별한다.
     # (뽐뿌가 막혀 글이 0건이어도 최초 실행 시작 메시지가 정상적으로 나가도록)
@@ -707,9 +802,34 @@ def claim_new_deals(posts):
                     """,
                     (seed_marker, '알림 시작 표식', 'system'),
                 )
+                for post in posts:
+                    cursor.execute(
+                        """
+                        INSERT INTO sent_deals (link, title, source)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (link) DO NOTHING
+                        """,
+                        (post['link'], post['title'], post['source']),
+                    )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                return [], True
 
-            new_posts = []
-            for post in posts:
+            links = [p['link'] for p in posts]
+            seen_links = set()
+            if links:
+                cursor.execute("SELECT link FROM sent_deals WHERE link = ANY(%s)", (links,))
+                seen_links = {row[0] for row in cursor.fetchall()}
+            candidates = [p for p in posts if p['link'] not in seen_links]
+            new_posts = candidates[:max_new] if max_new is not None else candidates
+            if len(candidates) > len(new_posts):
+                print(
+                    f"항공 특가: 이번 회차 상한({max_new}건) 초과로 "
+                    f"{len(candidates) - len(new_posts)}건은 다음 회차로 이월"
+                )
+
+            for post in new_posts:
                 cursor.execute(
                     """
                     INSERT INTO sent_deals (link, title, source)
@@ -718,13 +838,21 @@ def claim_new_deals(posts):
                     """,
                     (post['link'], post['title'], post['source']),
                 )
-                if cursor.rowcount and not first_run:
-                    new_posts.append(post)
 
             conn.commit()
+            # 오래된 기록은 정리한다 (30~60일 보관, dedupe 목적으로는 충분).
+            # 실패해도 위 결과 반환에는 영향 없도록 별도로 감싼다.
+            try:
+                cursor.execute(
+                    "DELETE FROM sent_deals WHERE sent_at < NOW() - INTERVAL '45 days' AND link != %s",
+                    (seed_marker,),
+                )
+                conn.commit()
+            except Exception:
+                pass
             cursor.close()
             conn.close()
-            return new_posts, first_run
+            return new_posts, False
         except Exception as e:
             print(f"❌ 특가 기록 DB 오류: {e}")
 
@@ -738,8 +866,18 @@ def claim_new_deals(posts):
         except Exception:
             pass
 
-    new_posts = [p for p in posts if p['link'] not in seen and p['link'] != seed_marker]
-    seen.update(p['link'] for p in posts)
+    candidates = [p for p in posts if p['link'] not in seen and p['link'] != seed_marker]
+    if first_run:
+        new_posts = candidates
+        seen.update(p['link'] for p in posts)
+    else:
+        new_posts = candidates[:max_new] if max_new is not None else candidates
+        if len(candidates) > len(new_posts):
+            print(
+                f"항공 특가: 이번 회차 상한({max_new}건) 초과로 "
+                f"{len(candidates) - len(new_posts)}건은 다음 회차로 이월"
+            )
+        seen.update(p['link'] for p in new_posts)
     seen.add(seed_marker)  # 글이 0건이어도 파일을 생성해 최초 실행 표식을 남긴다
     with open(SENT_DEALS_FILE, 'w', encoding='utf-8') as f:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
@@ -756,8 +894,12 @@ def format_deal_alert(new_posts, header=None, max_shown=MAX_DEALS_PER_ALERT):
     lines = [header or f"✈️ 새 항공 특가 {len(new_posts)}건!"]
     for post in shown:
         lines.append("")
-        lines.append(f"🔥 [{post['source']}] {post['title']}")
-        lines.append(post['link'])
+        lines.append(f"🔥 {post['title']}")
+        lines.append(f"출처: {post['source']}")
+        matched = post.get('matched_keywords')
+        if matched:
+            lines.append(f"매칭: {', '.join(matched)}")
+        lines.append(f"링크: {post['link']}")
     if len(new_posts) > len(shown):
         lines.append("")
         lines.append(f"…외 {len(new_posts) - len(shown)}건")
@@ -790,11 +932,14 @@ def add_pending_deals(posts):
             for post in posts:
                 cursor.execute(
                     """
-                    INSERT INTO pending_deals (link, title, source)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO pending_deals (link, title, source, matched_keywords)
+                    VALUES (%s, %s, %s, %s)
                     ON CONFLICT (link) DO NOTHING
                     """,
-                    (post['link'], post['title'], post['source']),
+                    (
+                        post['link'], post['title'], post['source'],
+                        ','.join(post.get('matched_keywords') or []),
+                    ),
                 )
             conn.commit()
             cursor.close()
@@ -810,6 +955,7 @@ def add_pending_deals(posts):
             continue
         clean = post.copy()
         clean.pop('dt_obj', None)
+        clean.pop('score', None)
         pending.append(clean)
         seen.add(post['link'])
     with open(PENDING_DEALS_FILE, 'w', encoding='utf-8') as f:
@@ -855,9 +1001,14 @@ def flush_deal_digest():
             conn = get_db_connection()
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(
-                "SELECT link, title, source FROM pending_deals ORDER BY added_at"
+                "SELECT link, title, source, matched_keywords FROM pending_deals ORDER BY added_at"
             )
-            pending = [dict(row) for row in cursor.fetchall()]
+            pending = []
+            for row in cursor.fetchall():
+                row = dict(row)
+                raw = row.pop('matched_keywords', None)
+                row['matched_keywords'] = raw.split(',') if raw else []
+                pending.append(row)
             cursor.close()
             conn.close()
         except Exception as e:
@@ -889,23 +1040,55 @@ def flush_deal_digest():
     return pending
 
 
+def _scrape_deal_board(board, global_exclude, global_include):
+    """소스 하나를 수집한다. 실패해도 예외를 삼키고 빈 목록을 반환해
+    ThreadPoolExecutor로 병렬 실행 중인 다른 소스에 영향을 주지 않는다."""
+    if global_exclude and not board.get('exclude_keyword'):
+        board = {**board, 'exclude_keyword': global_exclude}
+    if global_include and not board.get('keyword'):
+        board = {**board, 'keyword': global_include}
+    try:
+        found = scrape_configured_board(board)
+    except Exception as exc:
+        app.logger.warning('%s 수집 실패: %s', board.get('name'), exc)
+        return []
+    for post in found:
+        post['score'] = compute_deal_score(post, board)
+    return found
+
+
 def check_airline_deals():
     """특가 게시판을 수집해 새 글을 텔레그램으로 알린다. (스케줄러에서 주기 실행)"""
     config = load_config()
-    deal_boards = config.get('deal_boards', [])
+    deal_boards = [b for b in config.get('deal_boards', []) if b.get('enabled', True)]
     if not deal_boards:
         return []
 
-    print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 항공 특가 확인 중...")
+    print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 항공 특가 확인 중... (소스 {len(deal_boards)}개)")
 
     global_exclude = config.get('deal_exclude_keyword', '')
+    global_include = config.get('deal_include_keyword', '')
     posts_by_link = {}
-    for board in deal_boards:
-        if global_exclude and not board.get('exclude_keyword'):
-            board = {**board, 'exclude_keyword': global_exclude}
-        for post in scrape_configured_board(board):
-            posts_by_link.setdefault(post['link'], post)
-    posts = sorted(posts_by_link.values(), key=lambda p: p['dt_obj'], reverse=True)
+    with ThreadPoolExecutor(max_workers=DEAL_FETCH_CONCURRENCY) as executor:
+        futures = {
+            executor.submit(_scrape_deal_board, board, global_exclude, global_include): board
+            for board in deal_boards
+        }
+        for future in as_completed(futures):
+            board = futures[future]
+            try:
+                found = future.result()
+            except Exception as exc:
+                app.logger.warning('%s 수집 실패: %s', board.get('name'), exc)
+                found = []
+            for post in found:
+                posts_by_link.setdefault(post['link'], post)
+
+    # 점수(공식 소스 priority + 제목 특가 단어 가산점) 우선, 동점이면 최신순.
+    # claim_new_deals가 회차당 상한을 넘길 때 무엇을 먼저 확정할지 이 순서를 따른다.
+    posts = sorted(
+        posts_by_link.values(), key=lambda p: (p.get('score', 0), p['dt_obj']), reverse=True
+    )
 
     # 대시보드 확인용 캐시 저장
     clean_posts = []
@@ -923,7 +1106,7 @@ def check_airline_deals():
     except Exception as e:
         print(f"❌ 특가 캐시 저장 오류: {e}")
 
-    new_posts, first_run = claim_new_deals(posts)
+    new_posts, first_run = claim_new_deals(posts, max_new=DEAL_MAX_ALERTS_PER_RUN)
 
     if first_run:
         # 시작 인사는 보내지 않는다. DB가 없으면 재시작/배포 때마다 최초 실행으로
@@ -1109,11 +1292,22 @@ def api_deals_debug():
 
     config = load_config()
     global_exclude = config.get('deal_exclude_keyword', '')
+    global_include = config.get('deal_include_keyword', '')
+    # enabled=false 소스는 기본적으로 네트워크 요청 없이 건너뛴다.
+    # (비활성 소스가 수십 개 쌓이면 이 진단 페이지 자체가 느려지므로)
+    # ?include_disabled=1 을 붙이면 꺼진 소스도 실제로 확인해볼 수 있다.
+    check_disabled = request.args.get('include_disabled') == '1'
     report = []
     for board in config.get('deal_boards', []):
+        enabled = board.get('enabled', True)
+        if not enabled and not check_disabled:
+            report.append({'name': board.get('name'), 'url': board.get('url'), 'enabled': False})
+            continue
         if global_exclude and not board.get('exclude_keyword'):
             board = {**board, 'exclude_keyword': global_exclude}
-        entry = {'name': board.get('name'), 'url': board.get('url')}
+        if global_include and not board.get('keyword'):
+            board = {**board, 'keyword': global_include}
+        entry = {'name': board.get('name'), 'url': board.get('url'), 'enabled': enabled}
         if board.get('url'):
             try:
                 response = requests.get(
@@ -1196,7 +1390,51 @@ def visitors():
         visitors_data = load_visitors()
         return jsonify(visitors_data)
 
+def _run_deals_once():
+    """항공 특가 수집을 1회 실행하고 결과를 콘솔에 미리보기로 출력한다.
+
+    check_airline_deals()는 텔레그램으로 직접 보내지 않고 대기 목록에만
+    쌓으므로, 이 커맨드 자체가 안전한 dry-run이다. 실제 전송까지 보고
+    싶으면 --deals-flush-once 를 쓴다.
+    사용법: python app.py --deals-once
+    """
+    init_db()
+    new_posts = check_airline_deals()
+    print(f"\n수집 결과: 새 특가 {len(new_posts)}건 (회차당 상한 {DEAL_MAX_ALERTS_PER_RUN}건)")
+    if new_posts:
+        preview = format_deal_alert(
+            new_posts,
+            header=f"✈️ 새 항공 특가 {len(new_posts)}건! (dry-run 미리보기)",
+            max_shown=None,
+        )
+        print("\n--- 텔레그램 메시지 미리보기 (실제 전송 아님) ---")
+        print(preview)
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        print("\n(TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 미설정 → 실제 전송은 되지 않습니다.)")
+
+
+def _run_deals_flush_once():
+    """대기 중인 특가를 지금 즉시 정기 알림으로 보낸다. (실제 전송 테스트용)
+
+    사용법: python app.py --deals-flush-once
+    """
+    init_db()
+    sent = flush_deal_digest()
+    print(f"\n정기 알림 실행 결과: {len(sent)}건 처리")
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        print("(TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 미설정 → 대기 목록만 확인했고 전송은 되지 않았습니다.)")
+
+
 if __name__ == '__main__':
+    import sys
+
+    if '--deals-once' in sys.argv:
+        _run_deals_once()
+        sys.exit(0)
+    if '--deals-flush-once' in sys.argv:
+        _run_deals_flush_once()
+        sys.exit(0)
+
     # DB 초기화
     print("DB 초기화 중...")
     init_db()

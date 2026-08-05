@@ -26,3 +26,8 @@
     (기본 09/12/15/18/21시 KST)에 묶어서 보낸다.
   - 대기 목록은 `DATABASE_URL`이 있으면 DB, 없으면 파일에 저장한다.
     (파일은 재배포 시 초기화됨)
+  - `deal_boards` 각 항목의 `enabled`/`priority`/`id` 필드, 전역
+    `deal_include_keyword`(비어있는 소스의 기본 포함 키워드), 회차당 상한
+    `DEAL_MAX_ALERTS_PER_RUN`, 소스 병렬 수집, URL 정규화(`canonicalize_url`)
+    dedupe 등 소스 확장 관련 구조는 `README.md`에 정리해뒀다. 소스를
+    추가/수정할 때는 README를 먼저 참고할 것.

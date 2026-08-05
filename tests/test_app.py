@@ -56,6 +56,44 @@ class KeywordTests(unittest.TestCase):
         )
 
 
+class CanonicalizeUrlTests(unittest.TestCase):
+    def test_strips_tracking_params_and_sorts_remaining(self):
+        url = "https://example.com/deal?no=1&utm_source=fb&utm_medium=share&id=x"
+        self.assertEqual(
+            app.canonicalize_url(url),
+            "https://example.com/deal?id=x&no=1",
+        )
+
+    def test_removes_fbclid_and_gclid(self):
+        url = "https://example.com/deal?id=1&fbclid=abc&gclid=def"
+        self.assertEqual(app.canonicalize_url(url), "https://example.com/deal?id=1")
+
+    def test_two_links_differing_only_by_tracking_params_canonicalize_equal(self):
+        a = "https://example.com/deal/123?utm_source=telegram"
+        b = "https://example.com/deal/123?utm_campaign=summer"
+        self.assertEqual(app.canonicalize_url(a), app.canonicalize_url(b))
+
+    def test_no_query_left_unchanged_besides_host_case(self):
+        self.assertEqual(
+            app.canonicalize_url("https://EXAMPLE.com/path/"),
+            "https://example.com/path",
+        )
+
+    def test_empty_or_none_passthrough(self):
+        self.assertEqual(app.canonicalize_url(""), "")
+
+
+class DealScoreTests(unittest.TestCase):
+    def test_score_combines_priority_and_bonus_keywords(self):
+        board = {"priority": 8}
+        post = {"title": "[대한항공] 도쿄 왕복 특가 오픈특가 이벤트"}
+        # priority 8 + 왕복/특가/오픈특가 세 단어 매칭
+        self.assertEqual(app.compute_deal_score(post, board), 11)
+
+    def test_score_defaults_to_zero_priority_with_no_bonus_words(self):
+        self.assertEqual(app.compute_deal_score({"title": "그냥 제목"}, {}), 0)
+
+
 class OpenPortalTests(unittest.TestCase):
     @patch("app.requests.Session")
     def test_official_portal_keeps_recent_seoul_title_matches(self, session_class):
@@ -166,6 +204,29 @@ class DealNotificationTests(unittest.TestCase):
         self.assertFalse(first_run)
         self.assertEqual([p["title"] for p in new_posts], ["티웨이 땡처리"])
 
+    def test_claim_new_deals_caps_per_run_and_carries_over_the_rest(self):
+        """max_new를 넘긴 나머지는 유실이 아니라 다음 회차로 이월된다."""
+        # 최초 실행으로 시딩
+        app.claim_new_deals([])
+        self.assertTrue(os.path.exists(app.SENT_DEALS_FILE))
+
+        posts = [_deal(1, "특가 1"), _deal(2, "특가 2"), _deal(3, "특가 3")]
+        first_batch, first_run = app.claim_new_deals(posts, max_new=1)
+        self.assertFalse(first_run)
+        self.assertEqual([p["title"] for p in first_batch], ["특가 1"])
+
+        # 상한에 걸려 못 들어간 2건은 sent_deals에 기록되지 않았으므로
+        # 같은 posts를 다시 넘기면 여전히 새 글로 잡힌다 (유실 아님).
+        second_batch, first_run = app.claim_new_deals(posts, max_new=1)
+        self.assertFalse(first_run)
+        self.assertEqual([p["title"] for p in second_batch], ["특가 2"])
+
+        third_batch, _ = app.claim_new_deals(posts, max_new=10)
+        self.assertEqual([p["title"] for p in third_batch], ["특가 3"])
+
+        # 이제 전부 소진됐으니 더 이상 새 글이 없다.
+        self.assertEqual(app.claim_new_deals(posts, max_new=10)[0], [])
+
     @patch("app.requests.post")
     def test_send_telegram_message_splits_long_text(self, post):
         post.return_value = Mock(raise_for_status=Mock())
@@ -212,6 +273,8 @@ class DealNotificationTests(unittest.TestCase):
         self.assertIn("항공 특가 모음 1건", message)
         self.assertIn("티웨이 국제선 특가 오픈", message)
         self.assertIn("no=2", message)
+        self.assertIn("출처: 뽐뿌", message)
+        self.assertIn("링크: https://www.ppomppu.co.kr", message)
 
         # 다음 정기 알림: 모인 게 없으면 조용히 넘어감
         send.reset_mock()
@@ -222,6 +285,82 @@ class DealNotificationTests(unittest.TestCase):
         with open(app.DEALS_CACHE_FILE, encoding="utf-8") as f:
             cache = json.load(f)
         self.assertEqual(len(cache["deals"]), 2)
+
+    @patch("app.scrape_configured_board")
+    @patch("app.load_config")
+    def test_check_airline_deals_skips_disabled_boards(self, load_config, scrape):
+        load_config.return_value = {
+            "deal_boards": [
+                {"name": "켜짐", "url": "https://a.example.com", "keyword": "항공", "enabled": True},
+                {"name": "꺼짐", "url": "https://b.example.com", "keyword": "항공", "enabled": False},
+            ]
+        }
+        scrape.return_value = [_deal(1, "제주항공 특가")]
+
+        app.check_airline_deals()
+
+        called_boards = [call.args[0]["name"] for call in scrape.call_args_list]
+        self.assertIn("켜짐", called_boards)
+        self.assertNotIn("꺼짐", called_boards)
+
+    @patch("app.scrape_configured_board")
+    @patch("app.load_config")
+    def test_check_airline_deals_applies_global_include_keyword_when_board_has_none(
+        self, load_config, scrape
+    ):
+        load_config.return_value = {
+            "deal_include_keyword": "항공권.특가",
+            "deal_boards": [{"name": "공식이벤트", "url": "https://airline.example.com", "keyword": ""}],
+        }
+        scrape.return_value = []
+
+        app.check_airline_deals()
+
+        used_board = scrape.call_args[0][0]
+        self.assertEqual(used_board["keyword"], "항공권.특가")
+
+    @patch("app.send_telegram_message", return_value=True)
+    @patch("app.scrape_configured_board")
+    @patch("app.load_config")
+    def test_check_airline_deals_one_source_failure_does_not_break_others(
+        self, load_config, scrape, send
+    ):
+        """소스 하나가 예외를 던져도 나머지 소스는 정상 수집된다."""
+        load_config.return_value = {
+            "deal_boards": [
+                {"name": "고장남", "url": "https://broken.example.com", "keyword": "항공"},
+                {"name": "정상", "url": "https://ok.example.com", "keyword": "항공"},
+            ]
+        }
+
+        def side_effect(board):
+            if board["name"] == "고장남":
+                raise RuntimeError("접속 실패")
+            return [_deal(1, "제주항공 특가")]
+
+        scrape.side_effect = side_effect
+
+        # 최초 실행(시딩)은 알림이 없으므로, 시딩만 미리 해두고 본 실행에서 확인한다.
+        app.claim_new_deals([])
+        new_posts = app.check_airline_deals()
+
+        self.assertEqual([p["title"] for p in new_posts], ["제주항공 특가"])
+
+    @patch("app.send_telegram_message", return_value=True)
+    @patch("app.scrape_configured_board")
+    @patch("app.load_config")
+    def test_check_airline_deals_caps_new_alerts_per_run(self, load_config, scrape, send):
+        load_config.return_value = {
+            "deal_boards": [{"name": "뽐뿌", "url": "https://example.com", "keyword": "항공"}]
+        }
+        with patch.object(app, "DEAL_MAX_ALERTS_PER_RUN", 2):
+            scrape.return_value = []
+            self.assertEqual(app.check_airline_deals(), [])  # 최초 실행 시딩
+
+            scrape.return_value = [_deal(i, f"특가 {i}") for i in range(1, 6)]
+            new_posts = app.check_airline_deals()
+
+        self.assertEqual(len(new_posts), 2)
 
     @patch("app.send_telegram_message", return_value=True)
     def test_digest_drops_already_queued_excluded_deals(self, send):
@@ -358,6 +497,45 @@ class DealNotificationTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertIn("티웨이항공", posts[0]["title"])
         self.assertIn("/service/board/jirum/1234", posts[0]["link"])
+        self.assertEqual(posts[0]["matched_keywords"], ["항공"])
+
+    @patch("app.requests.Session")
+    def test_scrape_board_falls_back_to_all_anchor_tags(self, session_class):
+        """알려진 목록/테이블 구조가 없는 페이지(공식 이벤트 페이지 등)에서는
+        페이지의 모든 <a> 태그를 훑어 키워드로 매칭한다."""
+        response = Mock()
+        response.text = """
+        <nav><a href="/">홈</a></nav>
+        <section class="promo-cards">
+          <a href="/event/1">[특가] 도쿄 왕복 항공권 할인 이벤트</a>
+          <a href="/event/2">회사 소개</a>
+        </section>
+        """
+        response.encoding = "utf-8"
+        session_class.return_value.get.return_value = response
+
+        posts = app.scrape_board("https://airline.example.com/event/list", "테스트항공", "항공")
+
+        self.assertEqual(len(posts), 1)
+        self.assertIn("도쿄 왕복", posts[0]["title"])
+        self.assertEqual(posts[0]["link"], "https://airline.example.com/event/1")
+        self.assertEqual(posts[0]["date"], "")
+
+    @patch("app.requests.Session")
+    def test_scrape_board_canonicalizes_link_dropping_utm_params(self, session_class):
+        response = Mock()
+        response.text = """
+        <div class="list_item">
+          <a class="list_subject" href="/view?no=1&utm_source=fb">항공 특가 링크</a>
+        </div>
+        """
+        response.encoding = "utf-8"
+        session_class.return_value.get.return_value = response
+
+        posts = app.scrape_board("https://example.com/board", "테스트", "항공")
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["link"], "https://example.com/view?no=1")
 
     def test_format_deal_alert_truncates_long_lists(self):
         posts = [_deal(i, f"특가 {i}") for i in range(app.MAX_DEALS_PER_ALERT + 5)]
