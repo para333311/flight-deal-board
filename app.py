@@ -41,6 +41,12 @@ DEAL_MAX_ALERTS_PER_RUN = int(os.environ.get('DEAL_MAX_ALERTS_PER_RUN', '20'))
 # 묶어두기 위함이며, 소스 하나가 타임아웃(15초)이 나도 다른 소스 수집은
 # 그대로 진행된다.
 DEAL_FETCH_CONCURRENCY = int(os.environ.get('DEAL_FETCH_CONCURRENCY', '5'))
+# 작성일을 알 수 있는 글 중, 이보다 오래된 건 알림에서 뺀다 (예: Google
+# News가 재색인한 몇 달 전 기사). 작성일을 아예 못 얻은 글(공식 이벤트
+# 페이지처럼 날짜 정보가 없는 경우)은 이 필터에서 제외 — 걸러지는 게 아니라
+# 그냥 최신순 정렬에서 뒤로 밀린다.
+DEAL_MAX_AGE_DAYS = int(os.environ.get('DEAL_MAX_AGE_DAYS', '14'))
+UNKNOWN_POST_DATE = datetime(1900, 1, 1)
 # 정기 알림 시각 (한국시간). 기본: 낮 시간대에 3시간 간격 (새벽 0/3/6시는 제외)
 #  - DEAL_DIGEST_TIMES: 알림 시각 목록 (HH:MM 콤마 구분). 설정 시 이 시각에만 전송
 #  - DEAL_DIGEST_INTERVAL_HOURS: TIMES를 비우면 N시간마다 정각 전송 (0시 포함)
@@ -210,6 +216,20 @@ def compute_deal_score(post, board):
     title = post.get('title') or ''
     score += sum(1 for kw in DEAL_BONUS_KEYWORDS if kw in title)
     return score
+
+
+def is_too_old(post, max_age_days=DEAL_MAX_AGE_DAYS):
+    """작성일을 아는 글 중 max_age_days보다 오래된 것만 오래된 글로 본다.
+
+    Google News처럼 재색인된 몇 달 전 기사가 최신 글처럼 다시 노출되는
+    것을 막는다. 작성일을 못 구한 글(dt_obj가 UNKNOWN_POST_DATE)은 걸러낼
+    근거가 없으므로 그대로 통과시킨다 — 공식 이벤트 페이지 등은 날짜 정보가
+    없는 게 정상이라 여기서 막으면 아예 알림이 안 가게 된다.
+    """
+    dt_obj = post.get('dt_obj')
+    if not dt_obj or dt_obj == UNKNOWN_POST_DATE:
+        return False
+    return dt_obj < datetime.now() - timedelta(days=max_age_days)
 
 
 def scrape_board(url, name, keyword):
@@ -916,6 +936,27 @@ def _load_pending_from_file():
     return []
 
 
+def simplify_google_news_link(url, timeout=6):
+    """news.google.com의 긴 리다이렉트 링크를 실제 기사 URL로 풀어본다.
+
+    Google News RSS의 <link>는 base64 비슷한 토큰이 붙은 리다이렉트
+    URL이라 텔레그램 메시지에서 6~7줄을 차지할 만큼 길고 알아볼 수도
+    없다. 실제 서버 리다이렉트를 따라가 원문 언론사 URL을 얻을 수 있으면
+    그걸 쓰고, 실패(타임아웃/여전히 news.google.com/JS 리다이렉트 등)하면
+    원래 링크를 그대로 돌려준다 — 못 풀어도 알림 자체는 막지 않는다.
+    """
+    try:
+        response = requests.get(
+            url, headers=get_headers(url), timeout=timeout, allow_redirects=True,
+        )
+        final_url = response.url
+        if final_url and 'news.google.com' not in urlsplit(final_url).netloc:
+            return canonicalize_url(final_url)
+    except requests.RequestException:
+        pass
+    return url
+
+
 def add_pending_deals(posts):
     """새 특가를 즉시 보내지 않고 다음 정기 알림까지 대기 목록에 모아둔다.
 
@@ -925,6 +966,14 @@ def add_pending_deals(posts):
     posts = drop_excluded_posts(posts)
     if not posts:
         return
+
+    # 이 시점의 posts는 이미 회차당 상한(DEAL_MAX_ALERTS_PER_RUN)으로 걸러진
+    # 소수이므로, 여기서만 링크 단순화를 시도해도 요청 수가 크게 늘지 않는다.
+    posts = [
+        {**p, 'link': simplify_google_news_link(p['link'])}
+        if 'news.google.com' in p.get('link', '') else p
+        for p in posts
+    ]
     if DATABASE_URL:
         try:
             conn = get_db_connection()
@@ -1106,13 +1155,20 @@ def check_airline_deals():
     except Exception as e:
         print(f"❌ 특가 캐시 저장 오류: {e}")
 
-    new_posts, first_run = claim_new_deals(posts, max_new=DEAL_MAX_ALERTS_PER_RUN)
+    # 작성일을 아는 글 중 너무 오래된 건 알림 후보에서 뺀다 (대시보드 캐시는
+    # 위에서 이미 원본 그대로 저장했으니 디버그용으로는 계속 보인다).
+    fresh_posts = [p for p in posts if not is_too_old(p)]
+    stale_count = len(posts) - len(fresh_posts)
+    if stale_count:
+        print(f"항공 특가: {DEAL_MAX_AGE_DAYS}일 넘은 오래된 글 {stale_count}건 제외")
+
+    new_posts, first_run = claim_new_deals(fresh_posts, max_new=DEAL_MAX_ALERTS_PER_RUN)
 
     if first_run:
         # 시작 인사는 보내지 않는다. DB가 없으면 재시작/배포 때마다 최초 실행으로
         # 판정되어 같은 인사가 반복 전송되기 때문. 기존 글은 조용히 기록만 한다.
         # (연결 확인은 /api/telegram/test 사용)
-        print(f"항공 특가 알림 최초 실행: 기존 {len(posts)}건 기록 완료 (알림 없이 시작)")
+        print(f"항공 특가 알림 최초 실행: 기존 {len(fresh_posts)}건 기록 완료 (알림 없이 시작)")
         return []
 
     if not posts:

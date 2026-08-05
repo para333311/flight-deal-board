@@ -50,11 +50,23 @@
 | `keyword` | 포함 키워드 (마침표로 구분, OR 매칭). 비어 있으면 전역 `deal_include_keyword`를 대신 쓴다 |
 | `exclude_keyword` | 제외 키워드. 비어 있으면 전역 `deal_exclude_keyword`를 대신 쓴다 |
 
-**소스 켜고 끄기**: 지금은 국내 항공사 공식 이벤트 페이지, 뽐뿌/클리앙류
-커뮤니티, Google News RSS, 알구몬 검색까지 `enabled: true`로 켜져 있다.
-루리웹/에펨코리아/더쿠 같은 일반 커뮤니티, 해외 특가 블로그(SecretFlying
-등), 외항사 프로모션 페이지는 `enabled: false`로 등록만 해뒀다. 켜려면
-`config.json`에서 해당 항목의 `"enabled": false`를 `true`로 바꾸면 된다.
+**소스 켜고 끄기**: 지금 실제로 켜져(`enabled: true`) 있고 배포 후
+`/api/deals/debug`로 정상 수집 확인된 소스는 뽐뿌/뽐뿌RSS/해외뽐뿌/
+클리앙알뜰구매/루리웹핫딜(기존 커뮤니티 5곳)과 Google News RSS다.
+
+국내 항공사 공식 이벤트 페이지 9곳(대한항공/아시아나/제주항공/진에어/
+티웨이/에어부산/에어서울/에어프레미아/에어로케이)과 알구몬 검색,
+그리고 추측으로 넣었던 RSS 대체 경로 3곳은 실제 배포 확인 결과
+403(봇 차단)/404/타임아웃/빈 SPA 응답으로 전부 막혀 있어 `enabled: false`로
+꺼놨다. 항공사 사이트들은 대부분 Cloudflare 등으로 스크래핑을 막아둔
+것으로 보여, 단순 재시도로는 해결되지 않을 가능성이 높다 (URL이 바뀐
+경우도 있음 — 에어프레미아는 404).
+
+루리웹 외 일반 커뮤니티(에펨코리아/더쿠), 해외 특가 블로그(SecretFlying
+등), 그 외 외항사 프로모션 페이지는 아직 시도해보지 않은 소스라 등록만
+해두고 껐다. 켜려면 `config.json`에서 해당 항목의 `"enabled": false`를
+`true`로 바꾸고 배포 후 `/api/deals/debug?pw=1111&include_disabled=1`로
+실제로 잡히는지 꼭 확인할 것.
 
 ### 수집기(fetcher) 종류
 
@@ -86,6 +98,16 @@
   검토된다).
 - **오래된 dedupe 기록 정리.** DB 사용 시 `sent_deals`에서 45일 지난
   기록은 자동으로 지운다 (dedupe 목적으로는 충분한 보관 기간).
+- **오래된 뉴스 제외.** Google News RSS처럼 재색인으로 몇 달 전 기사가
+  최신 글처럼 다시 노출되는 경우, 작성일이 `DEAL_MAX_AGE_DAYS`(기본
+  14일)보다 오래됐으면 알림 후보에서 뺀다. 작성일을 아예 못 구한 글
+  (공식 이벤트 페이지 등)은 걸러낼 근거가 없으니 그대로 통과시킨다.
+- **Google News 링크 단순화.** Google News RSS의 `<link>`는 원문과 무관한
+  긴 리다이렉트 토큰 URL이라 메시지에서 여러 줄을 차지한다.
+  `simplify_google_news_link()`가 실제 서버 리다이렉트를 따라가 언론사
+  원문 URL로 바꿔치기하고, 못 풀면(타임아웃 등) 원래 링크를 그대로
+  쓴다 — 회차당 상한으로 이미 걸러진 소수의 글에만 적용해 요청 수를
+  늘리지 않는다.
 
 ## 텔레그램 메시지 형식
 
@@ -142,6 +164,7 @@ python app.py
 | `DEAL_CHECK_INTERVAL_MINUTES` | `30` | 소스 수집 주기 (분) |
 | `DEAL_MAX_ALERTS_PER_RUN` | `20` | 회차당 새로 대기 목록에 추가할 특가 상한 |
 | `DEAL_FETCH_CONCURRENCY` | `5` | 소스 병렬 수집 동시 실행 수 |
+| `DEAL_MAX_AGE_DAYS` | `14` | 작성일을 아는 글 중 이보다 오래된 건 알림에서 제외 |
 | `DEAL_DIGEST_TIMES` | `09:00,12:00,15:00,18:00,21:00` | 정기 알림 시각(KST, 콤마 구분). 설정하면 이 시각에만 발송 |
 | `DEAL_DIGEST_INTERVAL_HOURS` | `3` | `DEAL_DIGEST_TIMES`를 비우면 대신 N시간마다 정각 발송 |
 
