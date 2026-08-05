@@ -60,7 +60,7 @@
       "name": "뽐뿌_해외뽐뿌RSS",
       "type": "rss",
       "url": "https://www.ppomppu.co.kr/zboard/rss.php?id=ppomppu4",
-      "enabled": true,
+      "enabled": false,
       "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
@@ -69,7 +69,7 @@
       "name": "뽐뿌_뽐뿌게시판RSS(zboard)",
       "type": "rss",
       "url": "https://www.ppomppu.co.kr/zboard/rss.php?id=ppomppu",
-      "enabled": true,
+      "enabled": false,
       "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
@@ -78,7 +78,7 @@
       "name": "클리앙_알뜰구매RSS",
       "type": "rss",
       "url": "https://www.clien.net/service/rss/board/jirum",
-      "enabled": true,
+      "enabled": false,
       "priority": 5,
       "keyword": "항공.비행기.땡처리.진에어.티웨이.에어부산.에어서울.이스타.에어프레미아.아시아나"
     },
@@ -87,7 +87,7 @@
       "name": "알구몬_항공권검색",
       "type": "html",
       "url": "https://algumon.com/search/%ED%95%AD%EA%B3%B5%EA%B6%8C",
-      "enabled": true,
+      "enabled": false,
       "priority": 6,
       "keyword": ""
     },
@@ -96,7 +96,7 @@
       "name": "대한항공",
       "type": "html",
       "url": "https://www.koreanair.com/kr/ko/promotion/list",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -105,7 +105,7 @@
       "name": "아시아나항공",
       "type": "html",
       "url": "https://flyasiana.com/C/KR/KO/event/list",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -114,7 +114,7 @@
       "name": "제주항공",
       "type": "html",
       "url": "https://www.jejuair.net/ko/event/eventList.do",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -123,7 +123,7 @@
       "name": "진에어",
       "type": "html",
       "url": "https://www.jinair.com/promotion/eventList",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -132,7 +132,7 @@
       "name": "티웨이항공",
       "type": "html",
       "url": "https://www.twayair.com/app/promotion/event/retrieveEventList",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -141,7 +141,7 @@
       "name": "에어부산",
       "type": "html",
       "url": "https://www.airbusan.com/content/common/customercenter/event",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -150,7 +150,7 @@
       "name": "에어서울",
       "type": "html",
       "url": "https://flyairseoul.com/CW/ko/event/eventList.do",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -159,7 +159,7 @@
       "name": "에어프레미아",
       "type": "html",
       "url": "https://www.airpremia.com/kr/ko/event",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },
@@ -168,7 +168,7 @@
       "name": "에어로케이",
       "type": "html",
       "url": "https://www.aerok.com/kr/event",
-      "enabled": true,
+      "enabled": false,
       "priority": 8,
       "keyword": ""
     },

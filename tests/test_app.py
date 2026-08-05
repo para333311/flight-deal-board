@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -94,6 +94,46 @@ class DealScoreTests(unittest.TestCase):
         self.assertEqual(app.compute_deal_score({"title": "그냥 제목"}, {}), 0)
 
 
+class TooOldTests(unittest.TestCase):
+    def test_recent_post_is_not_too_old(self):
+        post = {"dt_obj": datetime.now() - timedelta(days=1)}
+        self.assertFalse(app.is_too_old(post, max_age_days=14))
+
+    def test_post_older_than_cutoff_is_too_old(self):
+        post = {"dt_obj": datetime.now() - timedelta(days=180)}
+        self.assertTrue(app.is_too_old(post, max_age_days=14))
+
+    def test_unknown_date_sentinel_is_never_too_old(self):
+        # 공식 이벤트 페이지 등 날짜를 못 구한 글은 걸러낼 근거가 없다.
+        post = {"dt_obj": app.UNKNOWN_POST_DATE}
+        self.assertFalse(app.is_too_old(post, max_age_days=14))
+
+    def test_missing_dt_obj_is_never_too_old(self):
+        self.assertFalse(app.is_too_old({}, max_age_days=14))
+
+
+class SimplifyGoogleNewsLinkTests(unittest.TestCase):
+    @patch("app.requests.get")
+    def test_resolves_redirect_to_publisher_url(self, get):
+        get.return_value = Mock(url="https://news.example.com/article/123?utm_source=rss")
+        result = app.simplify_google_news_link(
+            "https://news.google.com/rss/articles/CBMi...long...?oc=5"
+        )
+        self.assertEqual(result, "https://news.example.com/article/123")
+
+    @patch("app.requests.get")
+    def test_falls_back_to_original_when_still_on_google(self, get):
+        original = "https://news.google.com/rss/articles/CBMi...long...?oc=5"
+        get.return_value = Mock(url=original)
+        self.assertEqual(app.simplify_google_news_link(original), original)
+
+    @patch("app.requests.get")
+    def test_falls_back_to_original_on_request_failure(self, get):
+        get.side_effect = app.requests.RequestException("timeout")
+        original = "https://news.google.com/rss/articles/CBMi...long...?oc=5"
+        self.assertEqual(app.simplify_google_news_link(original), original)
+
+
 class OpenPortalTests(unittest.TestCase):
     @patch("app.requests.Session")
     def test_official_portal_keeps_recent_seoul_title_matches(self, session_class):
@@ -165,12 +205,15 @@ class OpenGovFallbackTests(unittest.TestCase):
         fallback.assert_not_called()
 
 
+DEAL_RECENT_DATE = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def _deal(no, title):
     return {
         "title": title,
         "link": f"https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no={no}",
-        "date": "2026-07-21",
-        "dt_obj": app.parse_date("2026-07-21"),
+        "date": DEAL_RECENT_DATE,
+        "dt_obj": app.parse_date(DEAL_RECENT_DATE),
         "source": "뽐뿌",
     }
 
@@ -361,6 +404,41 @@ class DealNotificationTests(unittest.TestCase):
             new_posts = app.check_airline_deals()
 
         self.assertEqual(len(new_posts), 2)
+
+    @patch("app.scrape_configured_board")
+    @patch("app.load_config")
+    def test_check_airline_deals_excludes_stale_news(self, load_config, scrape):
+        """Google News가 재색인한 몇 달 전 기사는 새 글로 잡히지 않는다."""
+        load_config.return_value = {
+            "deal_boards": [{"name": "GoogleNews", "url": "https://news.google.com/rss", "keyword": ""}]
+        }
+        old = _deal(1, "6개월 전 항공권 특가 기사")
+        old["dt_obj"] = datetime.now() - timedelta(days=200)
+        fresh = _deal(2, "오늘자 항공권 특가 기사")
+
+        scrape.return_value = []
+        self.assertEqual(app.check_airline_deals(), [])  # 최초 실행 시딩
+
+        scrape.return_value = [old, fresh]
+        new_posts = app.check_airline_deals()
+
+        self.assertEqual([p["title"] for p in new_posts], ["오늘자 항공권 특가 기사"])
+
+    @patch("app.simplify_google_news_link")
+    def test_add_pending_deals_simplifies_only_google_news_links(self, simplify):
+        simplify.return_value = "https://news.example.com/simplified"
+        google_deal = _deal(1, "구글뉴스 특가")
+        google_deal["link"] = "https://news.google.com/rss/articles/abc?oc=5"
+        other_deal = _deal(2, "뽐뿌 특가")
+
+        app.add_pending_deals([google_deal, other_deal])
+
+        simplify.assert_called_once_with("https://news.google.com/rss/articles/abc?oc=5")
+        with open(app.PENDING_DEALS_FILE, encoding="utf-8") as f:
+            pending = json.load(f)
+        links = {p["title"]: p["link"] for p in pending}
+        self.assertEqual(links["구글뉴스 특가"], "https://news.example.com/simplified")
+        self.assertEqual(links["뽐뿌 특가"], other_deal["link"])
 
     @patch("app.send_telegram_message", return_value=True)
     def test_digest_drops_already_queued_excluded_deals(self, send):
