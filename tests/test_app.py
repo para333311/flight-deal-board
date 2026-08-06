@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import tempfile
@@ -279,6 +280,15 @@ class DealNotificationTests(unittest.TestCase):
             self.assertTrue(app.send_telegram_message("가" * 5000))
         self.assertEqual(post.call_count, 2)
 
+    @patch("app.requests.post")
+    def test_send_telegram_message_uses_html_parse_mode(self, post):
+        post.return_value = Mock(raise_for_status=Mock())
+        with patch.object(app, "TELEGRAM_BOT_TOKEN", "token"), patch.object(
+            app, "TELEGRAM_CHAT_ID", "12345"
+        ):
+            app.send_telegram_message("안녕")
+        self.assertEqual(post.call_args.kwargs["json"]["parse_mode"], "HTML")
+
     def test_send_telegram_message_requires_configuration(self):
         with patch.object(app, "TELEGRAM_BOT_TOKEN", ""), patch.object(
             app, "TELEGRAM_CHAT_ID", ""
@@ -317,7 +327,7 @@ class DealNotificationTests(unittest.TestCase):
         self.assertIn("티웨이 국제선 특가 오픈", message)
         self.assertIn("no=2", message)
         self.assertIn("출처: 뽐뿌", message)
-        self.assertIn("링크: https://www.ppomppu.co.kr", message)
+        self.assertIn('<a href="https://www.ppomppu.co.kr', message)
 
         # 다음 정기 알림: 모인 게 없으면 조용히 넘어감
         send.reset_mock()
@@ -621,13 +631,33 @@ class DealNotificationTests(unittest.TestCase):
         self.assertIn(f"새 항공 특가 {app.MAX_DEALS_PER_ALERT + 5}건", message)
         self.assertIn("외 5건", message)
 
+    def test_format_deal_alert_hides_long_link_behind_short_anchor_text(self):
+        """긴 링크를 그대로 노출하지 않고 '링크'라는 짧은 글자에 매단다."""
+        post = _deal(1, "특가")
+        post["link"] = (
+            "https://news.google.com/rss/articles/"
+            "CBMiWEFVX3lxTFBqUmRmWtkSjhBc194WEhqaTU5T05ld1pjUEs5dVdOelF?oc=5"
+        )
+        message = app.format_deal_alert([post])
+
+        self.assertIn(f'<a href="{post["link"]}">링크</a>', message)
+        # 사람이 읽는 줄에는 원본 URL 그대로가 노출되지 않는다 (href 속성 안에만 존재)
+        visible_lines = [line for line in message.split("\n") if not line.startswith('🔗 <a href="')]
+        self.assertFalse(any(post["link"] in line for line in visible_lines))
+
+    def test_format_deal_alert_escapes_html_special_chars_in_title(self):
+        post = _deal(1, '특가 <5&6> "할인"')
+        message = app.format_deal_alert([post])
+        self.assertIn(html.escape('특가 <5&6> "할인"'), message)
+        self.assertNotIn('특가 <5&6> "할인"', message)  # 이스케이프 안 된 원문은 없어야 함
+
     def test_format_deal_alert_max_shown_none_includes_everything(self):
         posts = [_deal(i, f"특가 {i}") for i in range(app.MAX_DEALS_PER_ALERT + 51)]
         message = app.format_deal_alert(posts, max_shown=None)
         self.assertNotIn("외 ", message)
         for post in posts:
             self.assertIn(post["title"], message)
-            self.assertIn(post["link"], message)
+            self.assertIn(html.escape(post["link"], quote=True), message)
 
     def test_split_message_keeps_links_intact(self):
         # 4096자를 훌쩍 넘는 메시지를 만들어 링크가 중간에 끊기지 않는지 확인
@@ -639,10 +669,11 @@ class DealNotificationTests(unittest.TestCase):
         for chunk in chunks:
             self.assertLessEqual(len(chunk), app.TELEGRAM_MESSAGE_LIMIT)
 
-        # 모든 링크가 어느 한 조각 안에 온전히 존재해야 함
+        # 모든 링크가 어느 한 조각 안에 온전히 존재해야 함 (HTML 이스케이프된 형태로)
         for post in posts:
+            escaped_link = html.escape(post["link"], quote=True)
             self.assertTrue(
-                any(post["link"] in chunk for chunk in chunks),
+                any(escaped_link in chunk for chunk in chunks),
                 f"링크가 조각 사이에서 끊김: {post['link']}",
             )
 
@@ -674,7 +705,7 @@ class DealNotificationTests(unittest.TestCase):
         )
         self.assertNotIn("외 ", combined)
         for deal in pending:
-            self.assertIn(deal["link"], combined)
+            self.assertIn(html.escape(deal["link"], quote=True), combined)
 
 
 if __name__ == "__main__":
