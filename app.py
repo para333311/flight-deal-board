@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -780,6 +781,7 @@ def send_telegram_message(text):
                 json={
                     'chat_id': TELEGRAM_CHAT_ID,
                     'text': chunk,
+                    'parse_mode': 'HTML',
                     'disable_web_page_preview': True,
                 },
                 timeout=30,
@@ -905,21 +907,28 @@ def claim_new_deals(posts, max_new=None):
 
 
 def format_deal_alert(new_posts, header=None, max_shown=MAX_DEALS_PER_ALERT):
-    """새 특가 글 목록을 텔레그램 메시지 텍스트로 변환한다.
+    """새 특가 글 목록을 텔레그램 메시지 텍스트(HTML)로 변환한다.
 
     max_shown=None 이면 전체 글을 모두 포함한다.
     (전송 시 send_telegram_message가 4096자 단위로 알아서 나눠 보낸다)
+
+    send_telegram_message가 parse_mode=HTML로 보내므로, 링크는 URL을 그대로
+    노출하지 않고 "링크"라는 짧은 글자에 매달아 가독성을 지킨다 (특히
+    Google News RSS 링크처럼 원문과 무관하게 긴 리다이렉트 URL일 때 효과가
+    크다). 제목/출처/매칭 키워드는 외부에서 긁어온 텍스트라 <, >, & 등이
+    섞여 있을 수 있어 html.escape()로 이스케이프해 메시지가 깨지지 않게 한다.
     """
     shown = new_posts if max_shown is None else new_posts[:max_shown]
     lines = [header or f"✈️ 새 항공 특가 {len(new_posts)}건!"]
     for post in shown:
         lines.append("")
-        lines.append(f"🔥 {post['title']}")
-        lines.append(f"출처: {post['source']}")
+        lines.append(f"🔥 {html.escape(post['title'])}")
+        lines.append(f"출처: {html.escape(post['source'])}")
         matched = post.get('matched_keywords')
         if matched:
-            lines.append(f"매칭: {', '.join(matched)}")
-        lines.append(f"링크: {post['link']}")
+            lines.append(f"매칭: {html.escape(', '.join(matched))}")
+        link = html.escape(post['link'], quote=True)
+        lines.append(f'🔗 <a href="{link}">링크</a>')
     if len(new_posts) > len(shown):
         lines.append("")
         lines.append(f"…외 {len(new_posts) - len(shown)}건")
@@ -969,11 +978,20 @@ def add_pending_deals(posts):
 
     # 이 시점의 posts는 이미 회차당 상한(DEAL_MAX_ALERTS_PER_RUN)으로 걸러진
     # 소수이므로, 여기서만 링크 단순화를 시도해도 요청 수가 크게 늘지 않는다.
-    posts = [
-        {**p, 'link': simplify_google_news_link(p['link'])}
-        if 'news.google.com' in p.get('link', '') else p
-        for p in posts
-    ]
+    # 하나가 예상 못한 예외를 던져도 나머지 글은 원래 링크로라도 큐에 남도록
+    # 항목별로 감싼다 (simplify_google_news_link 자체도 흔한 실패는 이미
+    # 안에서 처리하지만, 여기서 한 번 더 방어한다).
+    simplified_posts = []
+    for p in posts:
+        if 'news.google.com' not in p.get('link', ''):
+            simplified_posts.append(p)
+            continue
+        try:
+            simplified_posts.append({**p, 'link': simplify_google_news_link(p['link'])})
+        except Exception as exc:
+            app.logger.warning('링크 단순화 실패 (%s): %s', p.get('title'), exc)
+            simplified_posts.append(p)
+    posts = simplified_posts
     if DATABASE_URL:
         try:
             conn = get_db_connection()
