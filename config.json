@@ -50,7 +50,7 @@
       "id": "google_news_flight_deals",
       "name": "GoogleNews_항공권특가",
       "type": "rss",
-      "url": "https://news.google.com/rss/search?q=%22%ED%95%AD%EA%B3%B5%EA%B6%8C%20%ED%8A%B9%EA%B0%80%22%20OR%20%22%EC%B0%9C%ED%8A%B9%EA%B0%80%22%20OR%20%22%EC%A7%84%EB%A7%88%EC%BC%93%22%20OR%20%22%EB%95%A1%EC%B2%98%EB%A6%AC%20%ED%95%AD%EA%B3%B5%EA%B6%8C%22&hl=ko&gl=KR&ceid=KR%3Ako",
+      "url": "https://news.google.com/rss/search?q=%22%ED%95%AD%EA%B3%B5%EA%B6%8C+%ED%8A%B9%EA%B0%80%22+OR+%22%EC%B0%9C%ED%8A%B9%EA%B0%80%22+OR+%22%EC%A7%84%EB%A7%88%EC%BC%93%22+OR+%22%EB%95%A1%EC%B2%98%EB%A6%AC+%ED%95%AD%EA%B3%B5%EA%B6%8C%22+when%3A3d&hl=ko&gl=KR&ceid=KR%3Ako",
       "enabled": true,
       "priority": 6,
       "keyword": ""
