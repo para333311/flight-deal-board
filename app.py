@@ -520,9 +520,13 @@ def scrape_rss(url, name, keyword):
                     dt_obj = parse_date(pub_date)
                     date_val = pub_date
 
+            final_link = canonicalize_url(link)
+            if 'news.google.com' in final_link:
+                final_link = simplify_google_news_link(final_link)
+
             posts.append({
                 'title': title,
-                'link': canonicalize_url(link),
+                'link': final_link,
                 'date': date_val,
                 'dt_obj': dt_obj,
                 'source': name,
@@ -950,10 +954,21 @@ def simplify_google_news_link(url, timeout=6):
 
     Google News RSS의 <link>는 base64 비슷한 토큰이 붙은 리다이렉트
     URL이라 텔레그램 메시지에서 6~7줄을 차지할 만큼 길고 알아볼 수도
-    없다. 실제 서버 리다이렉트를 따라가 원문 언론사 URL을 얻을 수 있으면
-    그걸 쓰고, 실패(타임아웃/여전히 news.google.com/JS 리다이렉트 등)하면
-    원래 링크를 그대로 돌려준다 — 못 풀어도 알림 자체는 막지 않는다.
+    없다. googlenewsdecoder를 활용해 원문 언론사 URL을 얻는다.
     """
+    if not url or 'news.google.com' not in url:
+        return url
+
+    try:
+        import googlenewsdecoder
+        res = googlenewsdecoder.new_decoderv1(url)
+        if isinstance(res, dict) and res.get('status') and res.get('decoded_url'):
+            decoded = res['decoded_url']
+            if decoded and 'news.google.com' not in urlsplit(decoded).netloc:
+                return canonicalize_url(decoded)
+    except Exception as exc:
+        app.logger.warning('googlenewsdecoder 디코딩 실패: %s', exc)
+
     try:
         response = requests.get(
             url, headers=get_headers(url), timeout=timeout, allow_redirects=True,
@@ -1093,6 +1108,17 @@ def flush_deal_digest():
         print(f"정기 특가 알림: 제외 키워드로 걸러낸 대기 글 {len(dropped)}건")
         _remove_pending_links(dropped, use_db)
         pending = kept
+
+    # 혹시 대기 목록에 news.google.com 링크가 남아있으면 전송 전에 디코딩하여 짧은 원문 링크로 변환한다
+    simplified_pending = []
+    for p in pending:
+        if 'news.google.com' in p.get('link', ''):
+            try:
+                p = {**p, 'link': simplify_google_news_link(p['link'])}
+            except Exception:
+                pass
+        simplified_pending.append(p)
+    pending = simplified_pending
 
     if not pending:
         print("정기 특가 알림: 모인 새 특가 없음 (전송 생략)")

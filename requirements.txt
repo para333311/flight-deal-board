@@ -6,3 +6,4 @@ gunicorn
 APScheduler
 pytz
 psycopg2-binary
+googlenewsdecoder
