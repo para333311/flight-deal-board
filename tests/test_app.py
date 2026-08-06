@@ -57,6 +57,20 @@ class KeywordTests(unittest.TestCase):
         )
 
 
+class ConfigSourcesTests(unittest.TestCase):
+    def test_google_news_query_is_scoped_to_recent_days(self):
+        """Google News 검색 RSS는 사실상 '현재 상위 결과' 스냅샷이라, when:
+        연산자로 최근 며칠로 좁혀두지 않으면 매번 같은 글만 잡혀 새 글이
+        거의 안 나온다. 이 조건이 실수로 빠지지 않도록 잠가둔다."""
+        config = json.loads(
+            Path(app.__file__).with_name("config.json").read_text(encoding="utf-8")
+        )
+        board = next(
+            b for b in config["deal_boards"] if b["id"] == "google_news_flight_deals"
+        )
+        self.assertIn("when%3A", board["url"])
+
+
 class CanonicalizeUrlTests(unittest.TestCase):
     def test_strips_tracking_params_and_sorts_remaining(self):
         url = "https://example.com/deal?no=1&utm_source=fb&utm_medium=share&id=x"
