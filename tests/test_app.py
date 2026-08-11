@@ -128,8 +128,25 @@ class TooOldTests(unittest.TestCase):
 
 
 class SimplifyGoogleNewsLinkTests(unittest.TestCase):
+    """simplify_google_news_link()는 googlenewsdecoder를 먼저 시도하고,
+    실패하면 실제 서버 리다이렉트를 따라가는 방식으로 폴백한다. 두 경로
+    모두 실제 네트워크를 타므로, 테스트에서는 둘 다 명시적으로 패치해
+    이 샌드박스의 네트워크 가용성과 무관하게 결정적으로 동작하게 한다."""
+
+    @patch("googlenewsdecoder.new_decoderv1")
+    def test_googlenewsdecoder_success_wins(self, decode):
+        decode.return_value = {
+            "status": True,
+            "decoded_url": "https://news.example.com/article/123?utm_source=rss",
+        }
+        result = app.simplify_google_news_link(
+            "https://news.google.com/rss/articles/CBMi...long...?oc=5"
+        )
+        self.assertEqual(result, "https://news.example.com/article/123")
+
     @patch("app.requests.get")
-    def test_resolves_redirect_to_publisher_url(self, get):
+    @patch("googlenewsdecoder.new_decoderv1", side_effect=Exception("decode failed"))
+    def test_falls_back_to_redirect_when_decoder_fails(self, decode, get):
         get.return_value = Mock(url="https://news.example.com/article/123?utm_source=rss")
         result = app.simplify_google_news_link(
             "https://news.google.com/rss/articles/CBMi...long...?oc=5"
@@ -137,13 +154,15 @@ class SimplifyGoogleNewsLinkTests(unittest.TestCase):
         self.assertEqual(result, "https://news.example.com/article/123")
 
     @patch("app.requests.get")
-    def test_falls_back_to_original_when_still_on_google(self, get):
+    @patch("googlenewsdecoder.new_decoderv1", side_effect=Exception("decode failed"))
+    def test_falls_back_to_original_when_still_on_google(self, decode, get):
         original = "https://news.google.com/rss/articles/CBMi...long...?oc=5"
         get.return_value = Mock(url=original)
         self.assertEqual(app.simplify_google_news_link(original), original)
 
     @patch("app.requests.get")
-    def test_falls_back_to_original_on_request_failure(self, get):
+    @patch("googlenewsdecoder.new_decoderv1", side_effect=Exception("decode failed"))
+    def test_falls_back_to_original_on_request_failure(self, decode, get):
         get.side_effect = app.requests.RequestException("timeout")
         original = "https://news.google.com/rss/articles/CBMi...long...?oc=5"
         self.assertEqual(app.simplify_google_news_link(original), original)
@@ -340,7 +359,6 @@ class DealNotificationTests(unittest.TestCase):
         self.assertIn("항공 특가 모음 1건", message)
         self.assertIn("티웨이 국제선 특가 오픈", message)
         self.assertIn("no=2", message)
-        self.assertIn("출처: 뽐뿌", message)
         self.assertIn('<a href="https://www.ppomppu.co.kr', message)
 
         # 다음 정기 알림: 모인 게 없으면 조용히 넘어감
@@ -571,6 +589,22 @@ class DealNotificationTests(unittest.TestCase):
         self.assertTrue(all("휴대폰" not in t and "시세표" not in t for t in titles))
         self.assertIn("[매직뱅크] 2026년 7월 27일 월, 여행 항공", titles)
 
+    def test_configured_board_excludes_portal_syndicated_duplicates(self):
+        """Google News가 물어오는 v.daum.net/네이트 재배포 중복 기사를 뺀다."""
+        exclude = json.loads(
+            Path(app.__file__).with_name("config.json").read_text(encoding="utf-8")
+        )["deal_exclude_keyword"]
+        collected = [
+            {"title": "에어부산, 동계 국내선 항공권 특가... 편도 2만3900원부터 - v.daum.net", "link": "a"},
+            {"title": "에어부산, 동계 국내선 항공권 특가... 편도 2만3900원부터 - 네이트", "link": "b"},
+            {"title": "추석 연휴·가을 항공권 특가 판매...11일 오전 예매 노리자 - gukjenews.com", "link": "c"},
+        ]
+        with patch("app._collect_board_posts", return_value=collected):
+            board = {"name": "t", "url": "https://a.b", "keyword": "", "exclude_keyword": exclude}
+            titles = [p["title"] for p in app.scrape_configured_board(board)]
+
+        self.assertEqual(titles, ["추석 연휴·가을 항공권 특가 판매...11일 오전 예매 노리자 - gukjenews.com"])
+
     @patch("app.requests.Session")
     def test_scrape_board_parses_clien_style_list(self, session_class):
         response = Mock()
@@ -599,7 +633,6 @@ class DealNotificationTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertIn("티웨이항공", posts[0]["title"])
         self.assertIn("/service/board/jirum/1234", posts[0]["link"])
-        self.assertEqual(posts[0]["matched_keywords"], ["항공"])
 
     @patch("app.requests.Session")
     def test_scrape_board_falls_back_to_all_anchor_tags(self, session_class):
@@ -664,6 +697,12 @@ class DealNotificationTests(unittest.TestCase):
         message = app.format_deal_alert([post])
         self.assertIn(html.escape('특가 <5&6> "할인"'), message)
         self.assertNotIn('특가 <5&6> "할인"', message)  # 이스케이프 안 된 원문은 없어야 함
+
+    def test_format_deal_alert_omits_source_and_matched_lines(self):
+        """출처/매칭 줄은 메시지에서 뺀다 (사용자 요청)."""
+        message = app.format_deal_alert([_deal(1, "특가")])
+        self.assertNotIn("출처:", message)
+        self.assertNotIn("매칭:", message)
 
     def test_format_deal_alert_max_shown_none_includes_everything(self):
         posts = [_deal(i, f"특가 {i}") for i in range(app.MAX_DEALS_PER_ALERT + 51)]

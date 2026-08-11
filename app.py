@@ -134,11 +134,6 @@ def init_db():
                 added_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        # 기존 배포에 이미 pending_deals 테이블이 있으면 CREATE TABLE IF NOT
-        # EXISTS로는 새 컬럼이 추가되지 않으므로 별도로 보강한다.
-        cursor.execute(
-            "ALTER TABLE pending_deals ADD COLUMN IF NOT EXISTS matched_keywords TEXT"
-        )
 
         conn.commit()
         cursor.close()
@@ -263,8 +258,7 @@ def scrape_board(url, name, keyword):
                 if len(title) < 3: continue
 
                 # 키워드 필터링 (여러 키워드 지원: OR 조건)
-                matched = [kw for kw in keywords if kw in title]
-                if keywords and not matched:
+                if keywords and not any(kw in title for kw in keywords):
                     continue
 
                 link = title_elem.get('href', '')
@@ -287,7 +281,6 @@ def scrape_board(url, name, keyword):
                     'date': date_val,
                     'dt_obj': parse_date(date_val),
                     'source': name,
-                    'matched_keywords': matched,
                 })
         else:
             # 알려진 목록/테이블 구조가 하나도 없는 페이지(공식 이벤트 페이지 등)를
@@ -298,8 +291,7 @@ def scrape_board(url, name, keyword):
                 title = anchor.get_text(strip=True)
                 if len(title) < 3:
                     continue
-                matched = [kw for kw in keywords if kw in title]
-                if keywords and not matched:
+                if keywords and not any(kw in title for kw in keywords):
                     continue
                 link = canonicalize_url(urljoin(url, anchor['href']))
                 if 'javascript' in link or link in seen_links:
@@ -311,7 +303,6 @@ def scrape_board(url, name, keyword):
                     'date': '',
                     'dt_obj': datetime(1900, 1, 1),
                     'source': name,
-                    'matched_keywords': matched,
                 })
 
         posts.sort(key=lambda x: x['dt_obj'], reverse=True)
@@ -505,8 +496,7 @@ def scrape_rss(url, name, keyword):
             link = (item.findtext('link') or '').strip()
             if len(title) < 3 or not link:
                 continue
-            matched = [kw for kw in keywords if kw in title]
-            if keywords and not matched:
+            if keywords and not any(kw in title for kw in keywords):
                 continue
 
             pub_date = (item.findtext('pubDate') or '').strip()
@@ -530,7 +520,6 @@ def scrape_rss(url, name, keyword):
                 'date': date_val,
                 'dt_obj': dt_obj,
                 'source': name,
-                'matched_keywords': matched,
             })
 
         posts.sort(key=lambda x: x['dt_obj'], reverse=True)
@@ -919,18 +908,14 @@ def format_deal_alert(new_posts, header=None, max_shown=MAX_DEALS_PER_ALERT):
     send_telegram_message가 parse_mode=HTML로 보내므로, 링크는 URL을 그대로
     노출하지 않고 "링크"라는 짧은 글자에 매달아 가독성을 지킨다 (특히
     Google News RSS 링크처럼 원문과 무관하게 긴 리다이렉트 URL일 때 효과가
-    크다). 제목/출처/매칭 키워드는 외부에서 긁어온 텍스트라 <, >, & 등이
-    섞여 있을 수 있어 html.escape()로 이스케이프해 메시지가 깨지지 않게 한다.
+    크다). 제목은 외부에서 긁어온 텍스트라 <, >, & 등이 섞여 있을 수 있어
+    html.escape()로 이스케이프해 메시지가 깨지지 않게 한다.
     """
     shown = new_posts if max_shown is None else new_posts[:max_shown]
     lines = [header or f"✈️ 새 항공 특가 {len(new_posts)}건!"]
     for post in shown:
         lines.append("")
         lines.append(f"🔥 {html.escape(post['title'])}")
-        lines.append(f"출처: {html.escape(post['source'])}")
-        matched = post.get('matched_keywords')
-        if matched:
-            lines.append(f"매칭: {html.escape(', '.join(matched))}")
         link = html.escape(post['link'], quote=True)
         lines.append(f'🔗 <a href="{link}">링크</a>')
     if len(new_posts) > len(shown):
@@ -1014,14 +999,11 @@ def add_pending_deals(posts):
             for post in posts:
                 cursor.execute(
                     """
-                    INSERT INTO pending_deals (link, title, source, matched_keywords)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO pending_deals (link, title, source)
+                    VALUES (%s, %s, %s)
                     ON CONFLICT (link) DO NOTHING
                     """,
-                    (
-                        post['link'], post['title'], post['source'],
-                        ','.join(post.get('matched_keywords') or []),
-                    ),
+                    (post['link'], post['title'], post['source']),
                 )
             conn.commit()
             cursor.close()
@@ -1083,14 +1065,9 @@ def flush_deal_digest():
             conn = get_db_connection()
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(
-                "SELECT link, title, source, matched_keywords FROM pending_deals ORDER BY added_at"
+                "SELECT link, title, source FROM pending_deals ORDER BY added_at"
             )
-            pending = []
-            for row in cursor.fetchall():
-                row = dict(row)
-                raw = row.pop('matched_keywords', None)
-                row['matched_keywords'] = raw.split(',') if raw else []
-                pending.append(row)
+            pending = [dict(row) for row in cursor.fetchall()]
             cursor.close()
             conn.close()
         except Exception as e:
