@@ -1086,16 +1086,18 @@ def flush_deal_digest():
         _remove_pending_links(dropped, use_db)
         pending = kept
 
-    # 혹시 대기 목록에 news.google.com 링크가 남아있으면 전송 전에 디코딩하여 짧은 원문 링크로 변환한다
-    simplified_pending = []
+    # 혹시 대기 목록에 news.google.com 링크가 남아있으면 전송 직전에만
+    # 짧은 원문 링크로 보여준다. 단, 대기 목록 삭제 키는 반드시 원본 링크를
+    # 써야 하므로 저장된 pending 자체는 바꾸지 않는다.
+    display_pending = []
     for p in pending:
-        if 'news.google.com' in p.get('link', ''):
+        display_link = p.get('link', '')
+        if 'news.google.com' in display_link:
             try:
-                p = {**p, 'link': simplify_google_news_link(p['link'])}
+                display_link = simplify_google_news_link(display_link)
             except Exception:
                 pass
-        simplified_pending.append(p)
-    pending = simplified_pending
+        display_pending.append({**p, 'link': display_link})
 
     if not pending:
         print("정기 특가 알림: 모인 새 특가 없음 (전송 생략)")
@@ -1104,7 +1106,7 @@ def flush_deal_digest():
     header = f"✈️ 항공 특가 모음 {len(pending)}건 ({get_korean_time().strftime('%m/%d %H:%M')})"
     # 정기 알림은 '…외 N건'으로 자르지 않고 전체를 보낸다.
     # (긴 메시지는 send_telegram_message가 4096자 단위로 나눠 여러 개로 전송)
-    if send_telegram_message(format_deal_alert(pending, header=header, max_shown=None)):
+    if send_telegram_message(format_deal_alert(display_pending, header=header, max_shown=None)):
         _remove_pending_links([p['link'] for p in pending], use_db)
         print(f"정기 특가 알림 전송: {len(pending)}건")
     return pending
