@@ -25,6 +25,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin
 
+# 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
+# probe()/introspect() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면
+# Render가 아직 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다
+# 문자열을 새로 바꿔둔다.
+BUILD_MARKER = 'tripdays-only-2026-09-17'
+
 import requests
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
@@ -610,6 +616,8 @@ def probe(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
     )
     departure, return_date = iter_weekend_trips()[0]
     return {
+        'build': BUILD_MARKER,
+        'query': NAVER_MIN_PRICES_BY_DATE_QUERY,
         'origin': origin,
         'destination': destination,
         'departure': f'{departure:%Y-%m-%d}',
