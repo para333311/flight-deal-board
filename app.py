@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -15,6 +16,8 @@ import pytz
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import flight_search
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -23,6 +26,12 @@ CONFIG_FILE = 'config.json'
 CACHE_FILE = 'cache.json'
 VISITORS_FILE = 'visitors.json'
 ADMIN_PASSWORD = "1111" # 기본 비밀번호
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_MESSAGE_LIMIT = 4096
+# 주말 항공권 추천을 보낼 시각 (KST, 콤마 구분). 하루 한 번이면 충분하다 —
+# 3개월치 × 도시 수만큼 네이버에 요청하므로 자주 돌릴수록 차단 위험이 커진다.
+FLIGHT_DIGEST_TIMES = os.environ.get('FLIGHT_DIGEST_TIMES', '09:00')
 # canonicalize_url()에서 제거하는 추적용 쿼리 파라미터 (동일 글이 utm 값만
 # 달라 다른 링크로 취급되어 중복 알림이 나가는 것을 막는다)
 TRACKING_QUERY_PARAMS = {
@@ -634,8 +643,96 @@ def background_scrape():
     print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 크롤링 완료! (게시판 {len(all_results)}개)")
 
 
+# ==================== 텔레그램 ====================
+
+def split_message_for_telegram(text, limit=TELEGRAM_MESSAGE_LIMIT):
+    """긴 메시지를 텔레그램 4096자 제한에 맞춰 줄 단위로 나눈다.
+
+    글자 수로 뚝 자르면 링크가 중간에 끊겨 클릭할 수 없게 되므로
+    반드시 줄바꿈 경계에서 나눈다. (한 줄이 제한을 넘는 극단적인 경우만 강제 분할)
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = ''
+    for line in text.split('\n'):
+        # 한 줄 자체가 제한을 넘는 경우: 어쩔 수 없이 강제 분할
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ''
+            chunks.append(line[:limit])
+            line = line[limit:]
+
+        candidate = f'{current}\n{line}' if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+
+def send_telegram_message(text):
+    """텔레그램 봇으로 메시지 전송 (4096자 제한에 맞춰 줄 단위 분할 전송)"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        app.logger.warning('텔레그램 미설정: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수를 확인하세요.')
+        return False
+
+    api_url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+    ok = True
+    for chunk in split_message_for_telegram(text):
+        try:
+            response = requests.post(
+                api_url,
+                json={
+                    'chat_id': TELEGRAM_CHAT_ID,
+                    'text': chunk,
+                    'parse_mode': 'HTML',
+                    'disable_web_page_preview': True,
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            app.logger.warning('텔레그램 전송 실패: %s', exc)
+            ok = False
+    return ok
+
+
+def run_flight_digest():
+    """주말 항공권 추천을 모아 텔레그램으로 보낸다. (스케줄러가 주기 실행)"""
+    print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 주말 항공권 검색 시작...")
+    picked = flight_search.run_weekend_flight_digest(send_telegram_message)
+    print(f"[{get_korean_time().strftime('%Y-%m-%d %H:%M:%S')}] 주말 항공권 추천 {len(picked)}건 발송")
+    return picked
+
+
 # gunicorn 배포에서는 __main__ 블록이 실행되지 않으므로 모듈 로드 시점에 방문자 테이블을 준비한다.
 init_db()
+
+# gunicorn 배포에서도 알림이 돌도록 모듈 로드 시점에 잡을 등록한다.
+# (텔레그램 미설정 상태나 테스트 실행 중에는 등록하지 않음)
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    for index, digest_time in enumerate(split_keywords(FLIGHT_DIGEST_TIMES)):
+        try:
+            hour, minute = digest_time.split(':')
+            scheduler.add_job(
+                func=run_flight_digest,
+                trigger='cron',
+                hour=int(hour),
+                minute=int(minute),
+                timezone='Asia/Seoul',
+                id=f'flight_digest_job_{index}',
+                name=f'주말 항공권 추천 ({digest_time} KST)',
+                replace_existing=True,
+            )
+        except (ValueError, TypeError) as exc:
+            print(f"❌ 항공권 알림 시각 형식 오류 ({digest_time}): {exc}")
 
 
 
@@ -689,6 +786,61 @@ def refresh_data():
     background_scrape()
     cache = load_cache()
     return jsonify(cache if cache else {'success': False, 'message': 'Refresh failed'})
+
+def _admin_password_from_request():
+    if request.method == 'POST':
+        return (request.json or {}).get('password')
+    return request.args.get('pw')
+
+
+@app.route('/api/flights/run', methods=['GET', 'POST'])
+def api_flights_run():
+    """주말 항공권 추천을 지금 즉시 검색해 텔레그램으로 보낸다.
+
+    브라우저에서 바로 실행: /api/flights/run?pw=1111
+    """
+    if _admin_password_from_request() != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    picked = run_flight_digest()
+    return jsonify({
+        'success': True,
+        'found': len(picked),
+        'telegram_configured': bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        'offers': [
+            {
+                'price': offer['price'],
+                'country': offer['country'],
+                'city': offer['city'],
+                'depart': f"{offer['depart']:%Y-%m-%d}",
+                'return': f"{offer['return']:%Y-%m-%d}",
+                'url': offer['url'],
+            }
+            for offer in picked
+        ],
+    })
+
+
+@app.route('/api/flights/probe')
+def api_flights_probe():
+    """네이버 항공권 수집 경로 진단. 브라우저에서 ?pw=1111 로 확인.
+
+    개발 환경에서는 네이버로 나갈 수 없어, 어떤 레시피가 실제로 통하는지는
+    배포된 뒤 이 엔드포인트로만 확인할 수 있다. ?telegram=1 을 붙이면 결과를
+    텔레그램으로도 보낸다.
+    """
+    if request.args.get('pw') != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    report = flight_search.probe(destination=request.args.get('to', 'NRT'))
+    if request.args.get('telegram') == '1':
+        send_telegram_message(
+            '🔎 네이버 항공권 진단\n<pre>'
+            + html.escape(json.dumps(report, ensure_ascii=False, indent=2))
+            + '</pre>'
+        )
+    return jsonify({'success': True, **report})
+
 
 @app.route('/api/visitors', methods=['GET', 'POST'])
 def visitors():
