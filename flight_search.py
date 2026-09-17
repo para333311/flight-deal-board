@@ -414,20 +414,56 @@ SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
 # 브라우저가 쓰는 쿼리문 자체는 JS 번들에 그대로 실려 온다.
 GQL_OPERATION_RE = re.compile(r'\b(query|mutation)\s+([A-Za-z_]\w*)\s*[({]')
 OPERATION_NAME_RE = re.compile(r'operationName\s*[:=]\s*["\']([A-Za-z_]\w*)["\']')
+# Apollo는 gql 템플릿을 AST로 컴파일해 넣기 때문에 오퍼레이션 이름이
+# 평문이 아니라 {kind:"Name",value:"..."} 노드로 박힌다.
+AST_OPERATION_RE = re.compile(
+    r'operation:\s*"(query|mutation)"\s*,\s*name:\s*\{\s*kind:\s*"Name"\s*,\s*value:\s*"(\w+)"'
+)
+
+# 운임 검색 쿼리를 곁가지 쿼리보다 먼저 집어내기 위한 점수표.
+# 상한이 낮았을 때 airportDetailList·promotions 같은 게 자리를 다 차지했다.
+OPERATION_SCORES = (
+    ('internation', 4), ('schedule', 4), ('fare', 3), ('shopping', 3),
+    ('search', 3), ('flight', 2), ('price', 2), ('list', 1), ('domestic', 1),
+)
+OPERATION_PENALTIES = (
+    'promotion', 'airportdetail', 'subscription', 'ads', 'banner', 'isdirect',
+    'delete', 'review', 'hotel', 'rentcar', 'benefit', 'coupon', 'notice',
+)
 
 
-def _extract_graphql_docs(text, interesting, doc_chars=1500, limit=5):
-    """번들 텍스트에서 GraphQL 오퍼레이션 정의를 잘라낸다."""
-    docs = []
+def score_operation_name(name):
+    """이름만 보고 '운임 검색 쿼리일 가능성'을 점수로 매긴다."""
+    lowered = name.lower()
+    if any(bad in lowered for bad in OPERATION_PENALTIES):
+        return 0
+    return sum(weight for keyword, weight in OPERATION_SCORES if keyword in lowered)
+
+
+def _extract_graphql_docs(text, interesting=None, doc_chars=2500, limit=8):
+    """번들 텍스트에서 GraphQL 오퍼레이션 정의를 잘라낸다.
+
+    interesting을 주면 그 패턴에 맞는 이름만, 없으면 점수가 높은 순으로
+    고른다. (점수는 score_operation_name 참고)
+    """
+    found = []
     for match in GQL_OPERATION_RE.finditer(text):
         name = match.group(2)
-        if not interesting.search(name):
+        if interesting is not None and not interesting.search(name):
             continue
-        snippet = text[match.start():match.start() + doc_chars]
-        docs.append({'operation': match.group(1), 'name': name, 'doc': snippet})
-        if len(docs) >= limit:
-            break
-    return docs
+        score = score_operation_name(name)
+        if interesting is None and score <= 0:
+            continue
+        found.append({
+            'operation': match.group(1),
+            'name': name,
+            'score': score,
+            'doc': text[match.start():match.start() + doc_chars],
+        })
+
+    if interesting is None:
+        found.sort(key=lambda d: -d['score'])
+    return found[:limit]
 
 
 def discover_queries(
@@ -436,6 +472,7 @@ def discover_queries(
     timeout=FETCH_TIMEOUT,
     max_scripts=30,
     max_bytes=6_000_000,
+    wanted=None,
 ):
     """네이버 항공권 JS 번들에서 실제 GraphQL 쿼리문을 찾아낸다.
 
@@ -448,9 +485,14 @@ def discover_queries(
     page = requests.get(page_url, headers=NAVER_PAGE_HEADERS, timeout=timeout)
     sources = [urljoin(page_url, src) for src in SCRIPT_SRC_RE.findall(page.text)]
 
-    interesting = re.compile(r'internation|domestic|flight|air|fare|schedule', re.I)
-    operation_names = set(OPERATION_NAME_RE.findall(page.text))
-    docs = _extract_graphql_docs(page.text, interesting)
+    def collect_names(text):
+        names = set(OPERATION_NAME_RE.findall(text))
+        names.update(name for _, name in AST_OPERATION_RE.findall(text))
+        names.update(name for _, name in GQL_OPERATION_RE.findall(text))
+        return names
+
+    operation_names = collect_names(page.text)
+    docs = _extract_graphql_docs(page.text)
 
     scanned = 0
     budget = max_bytes
@@ -466,16 +508,31 @@ def discover_queries(
         scanned += 1
         budget -= len(script.content)
         body = script.text
-        operation_names.update(OPERATION_NAME_RE.findall(body))
-        if len(docs) < 5:
-            docs.extend(_extract_graphql_docs(body, interesting, limit=5 - len(docs)))
+        operation_names.update(collect_names(body))
+        docs.extend(_extract_graphql_docs(body))
+
+    # 원하는 오퍼레이션을 콕 집어 볼 수 있게 (?op=이름)
+    if wanted:
+        docs = [d for d in docs if wanted.lower() in d['name'].lower()]
+
+    # 이름이 같은 중복을 없애고 점수 높은 순으로 추린다
+    best = {}
+    for doc in docs:
+        if doc['name'] not in best or len(doc['doc']) > len(best[doc['name']]['doc']):
+            best[doc['name']] = doc
+    ranked = sorted(best.values(), key=lambda d: -d['score'])[:8]
 
     return {
         'page_status': page.status_code,
         'scripts_found': len(sources),
         'scripts_scanned': scanned,
+        'operation_count': len(operation_names),
         'operation_names': sorted(operation_names),
-        'graphql_docs': docs,
+        'top_candidates': [
+            {'name': d['name'], 'score': d['score']}
+            for d in sorted(best.values(), key=lambda d: -d['score'])[:15]
+        ],
+        'graphql_docs': ranked,
         'errors': errors[:5],
     }
 
