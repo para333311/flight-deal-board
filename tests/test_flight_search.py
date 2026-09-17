@@ -394,6 +394,40 @@ class BundleDiscoveryTests(unittest.TestCase):
         self.assertEqual([d["name"] for d in docs], ["getInternationalFlightList"])
         self.assertIn("fare", docs[0]["doc"])
 
+    def test_search_queries_outrank_side_queries(self):
+        """상한이 낮을 때 airportDetailList 같은 곁가지가 자리를 다 먹었었다."""
+        bundle = (
+            "query airportDetailList($a: Int){ iataCode }"
+            "query international_promotions($b: Int){ promotions }"
+            "query getInternationalScheduleFareList($c: Int){ fare }"
+        )
+
+        docs = flight_search._extract_graphql_docs(bundle, limit=3)
+
+        self.assertEqual(docs[0]["name"], "getInternationalScheduleFareList")
+        # 곁가지로 알려진 것들은 아예 후보에서 빠진다
+        self.assertNotIn("airportDetailList", [d["name"] for d in docs])
+        self.assertNotIn("international_promotions", [d["name"] for d in docs])
+
+    def test_scoring_prefers_fare_search_names(self):
+        score = flight_search.score_operation_name
+        self.assertGreater(
+            score("getInternationalScheduleList"), score("getBookings")
+        )
+        # 곁가지로 확인된 이름은 0점 처리해 후보에서 제외
+        self.assertEqual(score("airportDetailList"), 0)
+        self.assertEqual(score("international_promotions"), 0)
+
+    def test_collects_names_from_apollo_ast_nodes(self):
+        """Apollo는 쿼리를 AST로 컴파일해 넣어서 이름이 평문으로 안 남는다."""
+        bundle = (
+            '{kind:"Document",definitions:[{kind:"OperationDefinition",'
+            'operation:"query",name:{kind:"Name",value:"getInternationalList"}}]}'
+        )
+        names = [n for _, n in flight_search.AST_OPERATION_RE.findall(bundle)]
+
+        self.assertEqual(names, ["getInternationalList"])
+
     def test_collects_operation_names_from_scripts(self):
         page_html = '<script src="/js/main.js"></script>'
         bundle = 'operationName:"getInternationalList",x=1,operationName:"getAirportList"'

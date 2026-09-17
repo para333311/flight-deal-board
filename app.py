@@ -861,15 +861,24 @@ def api_flights_schema():
     # introspection이 막혀 있으면 JS 번들에서 쿼리문을 직접 찾는다
     if report['graphql'].get('introspection') != 'ok':
         try:
-            report['bundle'] = flight_search.discover_queries()
+            report['bundle'] = flight_search.discover_queries(
+                wanted=request.args.get('op'),
+            )
         except requests.RequestException as exc:
             report['bundle'] = {'error': str(exc)}
 
     if request.args.get('telegram') == '1':
+        # 쿼리문까지 텔레그램으로 보내면 메시지가 수십 개로 쪼개진다.
+        # 이름 목록만 보내고 본문은 브라우저 JSON에서 본다.
+        bundle = report.get('bundle') or {}
         send_telegram_message(
-            '🧬 네이버 GraphQL 스키마\n<pre>'
-            + html.escape(json.dumps(report, ensure_ascii=False, indent=1))
-            + '</pre>'
+            '🧬 네이버 GraphQL 오퍼레이션\n'
+            f'스크립트 {bundle.get("scripts_scanned")}개 · '
+            f'오퍼레이션 {bundle.get("operation_count")}개\n\n'
+            '<b>유력 후보</b>\n'
+            + html.escape(json.dumps(
+                bundle.get('top_candidates', []), ensure_ascii=False, indent=1,
+            ))
         )
     return jsonify({'success': True, **report})
 
