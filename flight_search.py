@@ -193,11 +193,17 @@ NAVER_PAGE_HEADERS = {
 # 실제 유효 값은 introspection이 막혀 있어 알 수 없어서 여러 후보를
 # calibrate_min_prices_by_date()가 실제로 돌려보고 찾는다.
 #
+# timeCategories($timeCategories: [DepartureTimeCategory!]) 인자는 뺐다.
+# 값을 안 보내도(선언만 있어도) 12개 조합 전부 line 10 col 21 —
+# "DepartureTimeCategory" 타입명 정확히 그 위치 — 에서 동일하게
+# GRAPHQL_VALIDATION_FAILED로 죽었다. 값과 무관하게 모든 조합이 똑같이
+# 실패했다는 건 변수 값이 아니라 쿼리 '문서' 자체가 파싱 단계에서
+# 거부됐다는 뜻이라, 이 타입명이 실제 스키마에 없는 것으로 보고 뺐다.
+# (지금은 어차피 안 쓰던 필드라 손해가 없다 — 되찾으면 다시 붙이면 된다)
+#
 # 이 쿼리의 응답에는 시각(오전/오후) 정보가 없다 — departureDate/returnDate/
-# minPrice/tripType뿐이다. timeCategories 인자로 서버가 시간대 필터링을
-# 받아주는 것으로 보이지만 DepartureTimeCategory enum의 실제 값은 아직
-# 모른다. 그래서 이 쿼리만으로는 '오전 출발/오후 복귀' 조건을 검증할 수
-# 없고, depart_hour/return_hour는 항상 None(시간 미확인)으로 남는다.
+# minPrice/tripType뿐이다. 그래서 '오전 출발/오후 복귀' 조건은 아직 검증할
+# 수 없고, depart_hour/return_hour는 항상 None(시간 미확인)으로 남는다.
 NAVER_MIN_PRICES_BY_DATE_QUERY = """
 query minPricesByDate(
   $departureLocationCode: String
@@ -207,7 +213,6 @@ query minPricesByDate(
   $departureDate: String
   $groupByDepartureDate: Boolean
   $isNonstop: Boolean
-  $timeCategories: [DepartureTimeCategory!]
   $tripDays: [Int!]
   $tripType: String
 ) {
@@ -219,7 +224,6 @@ query minPricesByDate(
     departureDate: $departureDate
     groupByDepartureDate: $groupByDepartureDate
     isNonstop: $isNonstop
-    timeCategories: $timeCategories
     tripDays: $tripDays
     tripType: $tripType
   ) {
