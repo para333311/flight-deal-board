@@ -1,7 +1,12 @@
 # flight-deal-board
 
-항공권 특가 게시판을 수집해 텔레그램으로 알리는 Flask 앱. Render에 `main`
-브랜치가 배포된다.
+서울시/구청 도시정비(재개발·신속통합기획 등) 게시판을 수집해 대시보드로
+보여주는 Flask 앱. Render에 `main` 브랜치가 배포된다.
+
+> 항공권 특가를 텔레그램으로 알리던 기능은 실효성이 없어 폐기했다
+> (사용자 지시, 2026-09-17). `deal_boards`/`pending_deals`/텔레그램 발송 관련
+> 코드는 모두 제거됐고, `config.json`의 `boards`(구청 게시판 수집)만 남아
+> 있다.
 
 ## 작업 방식
 
@@ -14,20 +19,11 @@
 
 ## 구조 메모
 
-- `config.json` — 수집 대상 게시판과 키워드 설정.
-  - `deal_exclude_keyword` — 전역 제외 키워드(마침표/쉼표 구분). 지방 출발,
-    광고성 글, 휴대폰 성지·시세표 글 등을 알림에서 뺀다.
+- `config.json` — 수집 대상 게시판(`boards`) 설정. 항목별 `name`/`url`/
+  `keyword`/`exclude_keyword` 필드는 `README.md` 참고.
 - `app.py`
-  - `drop_excluded_posts()` — 제목에 제외 키워드가 있으면 걸러낸다. 수집
-    시점뿐 아니라 대기 목록 저장(`add_pending_deals`)과 전송
-    (`flush_deal_digest`) 시점에도 적용된다. 필터를 넓힐 때 이미 대기 목록에
-    쌓인 글이 뒤늦게 전송되는 것을 막기 위한 것이니 셋 다 유지할 것.
-  - 알림은 즉시 보내지 않고 `pending_deals`에 모아 정기 시각
-    (기본 09/12/15/18/21시 KST)에 묶어서 보낸다.
-  - 대기 목록은 `DATABASE_URL`이 있으면 DB, 없으면 파일에 저장한다.
-    (파일은 재배포 시 초기화됨)
-  - `deal_boards` 각 항목의 `enabled`/`priority`/`id` 필드, 전역
-    `deal_include_keyword`(비어있는 소스의 기본 포함 키워드), 회차당 상한
-    `DEAL_MAX_ALERTS_PER_RUN`, 소스 병렬 수집, URL 정규화(`canonicalize_url`)
-    dedupe 등 소스 확장 관련 구조는 `README.md`에 정리해뒀다. 소스를
-    추가/수정할 때는 README를 먼저 참고할 것.
+  - `background_scrape()` — 30분마다(또는 `/api/refresh` 호출 시) `boards`를
+    훑어 `cache.json`에 저장한다. `/`, `/api/scrape_all`이 이 캐시를 쓴다.
+  - `drop_excluded_posts()` — 제목에 제외 키워드가 있으면 걸러낸다.
+  - 소스 확장 관련 구조는 `README.md`에 정리해뒀다. 소스를 추가/수정할 때는
+    README를 먼저 참고할 것.
