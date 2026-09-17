@@ -280,10 +280,18 @@ class RowsToOffersTests(unittest.TestCase):
 
 
 class CalibrateMinPricesByDateTests(unittest.TestCase):
+    def setUp(self):
+        # warm_session()의 실제 네트워크 시도를 막아 테스트를 빠르고
+        # 결정적으로 만든다 — fetch_min_prices_by_date 자체는 모킹하므로
+        # 세션 내용은 테스트와 무관하다.
+        patcher = patch.object(flight_search, "warm_session", return_value=Mock())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_stops_at_the_first_combo_that_returns_rows(self):
         calls = []
 
-        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout):
+        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout, **kwargs):
             calls.append((location_type, trip_type))
             if location_type == "CITY" and trip_type == "RT":
                 return [{"departureDate": "20261010", "minPrice": 1000}], {"status": 200}
@@ -310,7 +318,7 @@ class CalibrateMinPricesByDateTests(unittest.TestCase):
         self.assertEqual(len(attempts), expected)
 
     def test_network_error_in_one_combo_does_not_abort_calibration(self):
-        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout):
+        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout, **kwargs):
             if location_type == "AIRPORT":
                 raise flight_search.requests.RequestException("boom")
             return [{"departureDate": "20261010", "minPrice": 1000}], {"status": 200}
@@ -559,6 +567,11 @@ class RenderTypeRefTests(unittest.TestCase):
 class CollectOffersTests(unittest.TestCase):
     CALIBRATION = {"location_type": "CITY", "trip_type": "RT", "sample": []}
 
+    def setUp(self):
+        patcher = patch.object(flight_search, "warm_session", return_value=Mock())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_skips_over_cap_fares_and_keeps_destination_metadata(self):
         trips = [(date(2026, 10, 10), date(2026, 10, 12))]
         destinations = (
@@ -566,7 +579,7 @@ class CollectOffersTests(unittest.TestCase):
             {"code": "BKK", "city": "방콕", "country": "태국"},
         )
 
-        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout=None):
+        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout=None, **kwargs):
             price = 150000 if destination == "FUK" else 900000
             return [{"departureDate": "20261010", "returnDate": "20261012", "minPrice": price}], {}
 
