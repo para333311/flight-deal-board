@@ -823,9 +823,10 @@ def api_flights_run():
 
 @app.route('/api/flights/probe')
 def api_flights_probe():
-    """네이버 항공권 수집 경로 진단. 브라우저에서 ?pw=1111 로 확인.
+    """minPricesByDate의 locationType/tripType 후보 조합을 실제로 돌려보고
+    어떤 게 통하는지 진단한다. 브라우저에서 ?pw=1111 로 확인.
 
-    개발 환경에서는 네이버로 나갈 수 없어, 어떤 레시피가 실제로 통하는지는
+    개발 환경에서는 네이버로 나갈 수 없어, 어떤 조합이 실제로 통하는지는
     배포된 뒤 이 엔드포인트로만 확인할 수 있다. ?telegram=1 을 붙이면 결과를
     텔레그램으로도 보낸다.
     """
