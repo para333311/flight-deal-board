@@ -29,7 +29,7 @@ from urllib.parse import urljoin
 # probe()/introspect() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면
 # Render가 아직 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다
 # 문자열을 새로 바꿔둔다.
-BUILD_MARKER = 'tripdays-only-2026-09-17'
+BUILD_MARKER = 'warm-session-2026-09-17'
 
 import requests
 
@@ -277,20 +277,40 @@ def _rows_from_min_prices_body(body):
     return rows if isinstance(rows, list) else None
 
 
+def warm_session(timeout=FETCH_TIMEOUT):
+    """flight.naver.com을 먼저 방문해 세션 쿠키를 확보한다.
+
+    쿠키 없이 GraphQL 엔드포인트를 바로 두드리면 실제 번들에 있는 필드인데도
+    "Cannot query field" 류로 보이는 GRAPHQL_VALIDATION_FAILED가 난다 —
+    게이트웨이가 세션 없는 요청은 축소된 스키마로 응답하는 것으로 보인다.
+    진짜 브라우저처럼 페이지부터 들른 뒤 같은 세션으로 GraphQL을 부른다.
+    """
+    session = requests.Session()
+    try:
+        session.get(
+            'https://flight.naver.com/', headers=NAVER_PAGE_HEADERS, timeout=timeout,
+        )
+    except requests.RequestException:
+        pass
+    return session
+
+
 def fetch_min_prices_by_date(
     origin, destination, trip_days, location_type=None, trip_type=None,
-    timeout=FETCH_TIMEOUT,
+    timeout=FETCH_TIMEOUT, session=None,
 ):
     """도시 하나의 날짜별 최저가 목록을 한 번에 받아온다.
 
     locationType/tripType은 문자열 인자라 틀려도 에러 없이 빈 결과만
     돌아오므로, 호출부(calibrate_min_prices_by_date/collect_offers)가 실제로
-    행이 돌아오는 조합을 찾아 넘겨줘야 한다.
+    행이 돌아오는 조합을 찾아 넘겨줘야 한다. session을 주지 않으면 쿠키 없는
+    1회성 요청이 되므로, 보통은 warm_session()으로 만든 세션을 넘긴다.
     """
     variables = _min_prices_by_date_variables(
         origin, destination, trip_days, location_type, trip_type,
     )
-    response = requests.post(
+    http = session or requests
+    response = http.post(
         NAVER_GRAPHQL_URL,
         json={'query': NAVER_MIN_PRICES_BY_DATE_QUERY, 'variables': variables},
         headers=NAVER_PAGE_HEADERS,
@@ -317,18 +337,22 @@ def fetch_min_prices_by_date(
 
 def calibrate_min_prices_by_date(
     origin=ORIGIN, destination='NRT', trip_days=TRIP_NIGHTS, timeout=FETCH_TIMEOUT,
+    session=None,
 ):
     """locationType/tripType 후보 중 실제로 행을 돌려주는 조합을 찾는다.
 
     한 번 찾으면 이후 도시마다 다시 찾을 필요 없이 재사용한다(collect_offers
-    가 이 함수를 한 번만 호출해 캐시한다).
+    가 이 함수를 한 번만 호출해 캐시한다). session을 안 주면 warm_session()
+    으로 하나 만들어 쓴다.
     """
+    session = session or warm_session(timeout)
     attempts = []
     for location_type in LOCATION_TYPE_CANDIDATES:
         for trip_type in TRIP_TYPE_CANDIDATES:
             try:
                 rows, diagnostic = fetch_min_prices_by_date(
-                    origin, destination, trip_days, location_type, trip_type, timeout,
+                    origin, destination, trip_days, location_type, trip_type,
+                    timeout, session=session,
                 )
             except requests.RequestException as exc:
                 diagnostic = {'error': f'요청 실패: {exc}'}
@@ -611,13 +635,15 @@ def probe(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
     개발 환경에서는 네이버로 나갈 수 없어 이 함수만이 실물 응답을 볼 수 있는
     유일한 창구다. 성공하면 캘리브레이션 결과와 실제 표본 행을 돌려준다.
     """
+    session = warm_session(timeout)
     calibration, attempts = calibrate_min_prices_by_date(
-        origin=origin, destination=destination, timeout=timeout,
+        origin=origin, destination=destination, timeout=timeout, session=session,
     )
     departure, return_date = iter_weekend_trips()[0]
     return {
         'build': BUILD_MARKER,
         'query': NAVER_MIN_PRICES_BY_DATE_QUERY,
+        'cookies_obtained': len(session.cookies),
         'origin': origin,
         'destination': destination,
         'departure': f'{departure:%Y-%m-%d}',
@@ -723,8 +749,12 @@ def collect_offers(
         'total': len(destinations), 'aborted': False,
     }
 
+    # 세션을 한 번만 만들어 캘리브레이션과 도시별 요청 전체에서 재사용한다.
+    # (쿠키 없이 GraphQL만 두드리면 게이트웨이가 필드를 모르는 것처럼
+    # 취급한다 — warm_session 참고)
+    session = warm_session()
     if calibration is None:
-        calibration, _ = calibrate_min_prices_by_date(origin=origin)
+        calibration, _ = calibrate_min_prices_by_date(origin=origin, session=session)
     if calibration is None:
         stats['aborted'] = True
         return [], stats
@@ -735,6 +765,7 @@ def collect_offers(
             executor.submit(
                 fetch_min_prices_by_date, origin, dest['code'], TRIP_NIGHTS,
                 calibration['location_type'], calibration['trip_type'],
+                session=session,
             ): dest
             for dest in destinations
         }
