@@ -842,6 +842,31 @@ def api_flights_probe():
     return jsonify({'success': True, **report})
 
 
+@app.route('/api/flights/schema')
+def api_flights_schema():
+    """네이버 GraphQL 스키마에서 실제 필드·입력타입 이름을 조회한다.
+
+    요청 레시피를 추측으로 맞출 수 없으니 스키마에 직접 물어본다.
+    브라우저에서 ?pw=1111&telegram=1 로 실행하면 결과가 텔레그램으로도 온다.
+    """
+    if request.args.get('pw') != ADMIN_PASSWORD:
+        return jsonify({'success': False, 'message': 'Password Denied'}), 403
+
+    report = {'graphql': flight_search.introspect()}
+    try:
+        report['page'] = flight_search.inspect_page()
+    except requests.RequestException as exc:
+        report['page'] = {'error': str(exc)}
+
+    if request.args.get('telegram') == '1':
+        send_telegram_message(
+            '🧬 네이버 GraphQL 스키마\n<pre>'
+            + html.escape(json.dumps(report, ensure_ascii=False, indent=1))
+            + '</pre>'
+        )
+    return jsonify({'success': True, **report})
+
+
 @app.route('/api/visitors', methods=['GET', 'POST'])
 def visitors():
     """방문자 수 관리"""

@@ -246,6 +246,102 @@ class SearchFareTests(unittest.TestCase):
         self.assertIsNone(source)
 
 
+def _type_ref(kind, name=None, of_type=None):
+    return {"kind": kind, "name": name, "ofType": of_type}
+
+
+class IntrospectionTests(unittest.TestCase):
+    """요청 레시피를 추측으로 맞출 수 없으니 스키마에 직접 물어본다."""
+
+    ROOT = {
+        "data": {
+            "__schema": {
+                "queryType": {
+                    "name": "Query",
+                    "fields": [
+                        {
+                            "name": "internationalFlightList",
+                            "args": [
+                                {
+                                    "name": "itinerary",
+                                    "type": _type_ref(
+                                        "NON_NULL",
+                                        of_type=_type_ref(
+                                            "LIST",
+                                            of_type=_type_ref(
+                                                "INPUT_OBJECT", "FlightItineraryInput"
+                                            ),
+                                        ),
+                                    ),
+                                },
+                                {"name": "adult", "type": _type_ref("SCALAR", "Int")},
+                            ],
+                        },
+                        {"name": "unrelatedThing", "args": []},
+                    ],
+                }
+            }
+        }
+    }
+    INPUT = {
+        "data": {
+            "__type": {
+                "name": "FlightItineraryInput",
+                "kind": "INPUT_OBJECT",
+                "inputFields": [
+                    {"name": "departureAirport", "type": _type_ref("SCALAR", "String")},
+                ],
+            }
+        }
+    }
+
+    def _fake_post(self, query, variables=None, timeout=None):
+        return (200, self.ROOT) if not variables else (200, self.INPUT)
+
+    def test_reports_real_field_names_and_expands_input_types(self):
+        with patch.object(flight_search, "_post_graphql", side_effect=self._fake_post):
+            report = flight_search.introspect()
+
+        self.assertEqual(report["introspection"], "ok")
+        self.assertEqual(report["query_type"], "Query")
+        self.assertIn("internationalFlightList", report["all_field_names"])
+        # 항공권과 무관한 필드는 추려낸다
+        self.assertEqual([f["name"] for f in report["matching_fields"]],
+                         ["internationalFlightList"])
+        args = report["matching_fields"][0]["args"]
+        self.assertEqual(args[0]["type"], "[FlightItineraryInput]!")
+        self.assertIn("FlightItineraryInput", report["input_types"])
+
+    def test_scalar_args_do_not_trigger_input_type_lookups(self):
+        with patch.object(flight_search, "_post_graphql", side_effect=self._fake_post):
+            report = flight_search.introspect()
+
+        self.assertNotIn("Int", report["input_types"])
+
+    def test_says_unavailable_when_introspection_is_disabled(self):
+        blocked = (400, {"errors": [{"message": "introspection is disabled"}]})
+        with patch.object(flight_search, "_post_graphql", return_value=blocked):
+            report = flight_search.introspect()
+
+        self.assertEqual(report["introspection"], "unavailable")
+        self.assertIn("introspection is disabled", report["detail"])
+
+
+class RenderTypeRefTests(unittest.TestCase):
+    def test_unwraps_non_null_and_list_wrappers(self):
+        ref = _type_ref(
+            "NON_NULL",
+            of_type=_type_ref("LIST", of_type=_type_ref("INPUT_OBJECT", "Foo")),
+        )
+        self.assertEqual(flight_search._render_type_ref(ref), "[Foo]!")
+
+    def test_plain_scalar(self):
+        self.assertEqual(flight_search._render_type_ref(_type_ref("SCALAR", "Int")), "Int")
+
+    def test_missing_type_is_not_a_crash(self):
+        self.assertEqual(flight_search._render_type_ref(None), "?")
+
+
 class CollectOffersTests(unittest.TestCase):
     def test_skips_over_cap_fares_and_keeps_destination_metadata(self):
         trips = [(date(2026, 10, 10), date(2026, 10, 12))]
