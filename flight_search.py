@@ -195,9 +195,12 @@ query getInternationalList($trip: String, $itinerary: [ItineraryInput], $adult: 
 """
 
 EMBEDDED_JSON_RE = re.compile(
-    r'(?:__NEXT_DATA__|__APOLLO_STATE__|__PRELOADED_STATE__)\s*=\s*({.*?})\s*[;<]',
+    r'(?:__NEXT_DATA__|__APOLLO_STATE__|__PRELOADED_STATE__|__NUXT__|__INITIAL_STATE__)'
+    r'\s*=\s*({.*?})\s*[;<]',
     re.DOTALL,
 )
+# 페이지가 어떤 이름으로 상태를 심어두는지 알아내기 위한 진단용 패턴
+STATE_VAR_RE = re.compile(r'(?:window\.)?(__[A-Z0-9_]+__)\s*=')
 
 
 def _fetch_via_graphql(origin, destination, departure, return_date, timeout):
@@ -282,6 +285,135 @@ def search_fare(origin, destination, departure, return_date, timeout=FETCH_TIMEO
         if fare is not None:
             return fare, name
     return None, None
+
+
+ROOT_FIELDS_QUERY = """
+query {
+  __schema {
+    queryType {
+      name
+      fields {
+        name
+        args {
+          name
+          type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
+        }
+      }
+    }
+  }
+}
+"""
+
+INPUT_TYPE_QUERY = """
+query($name: String!) {
+  __type(name: $name) {
+    name
+    kind
+    inputFields {
+      name
+      type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
+    }
+  }
+}
+"""
+
+# 항공권 검색과 관련 있어 보이는 필드만 추려 응답을 짧게 유지한다
+FLIGHT_FIELD_RE = re.compile(r'internation|domestic|flight|air|fare|schedule|list', re.I)
+
+
+def _render_type_ref(type_ref):
+    """introspection의 중첩된 타입 표현을 '[ItineraryInput!]!' 형태로 편다."""
+    if not type_ref:
+        return '?'
+    kind = type_ref.get('kind')
+    if kind == 'NON_NULL':
+        return _render_type_ref(type_ref.get('ofType')) + '!'
+    if kind == 'LIST':
+        return '[' + _render_type_ref(type_ref.get('ofType')) + ']'
+    return type_ref.get('name') or '?'
+
+
+def _post_graphql(query, variables=None, timeout=FETCH_TIMEOUT):
+    response = requests.post(
+        NAVER_GRAPHQL_URL,
+        json={'query': query, 'variables': variables or {}},
+        headers=NAVER_PAGE_HEADERS,
+        timeout=timeout,
+    )
+    try:
+        return response.status_code, response.json()
+    except ValueError:
+        return response.status_code, {'_raw': response.text[:400]}
+
+
+def introspect(timeout=FETCH_TIMEOUT, max_input_types=8):
+    """네이버 GraphQL 스키마에서 실제 필드·입력타입 이름을 뽑아온다.
+
+    요청 레시피를 추측으로 맞추는 대신 스키마에 직접 물어보기 위한 진단용.
+    (개발 환경에서는 네이버로 나갈 수 없어 배포 후에만 실행된다)
+    """
+    status, body = _post_graphql(ROOT_FIELDS_QUERY, timeout=timeout)
+    schema = (body.get('data') or {}).get('__schema') or {}
+    query_type = schema.get('queryType') or {}
+    fields = query_type.get('fields') or []
+
+    if not fields:
+        return {
+            'introspection': 'unavailable',
+            'status': status,
+            'detail': json.dumps(body, ensure_ascii=False)[:500],
+        }
+
+    def describe(field):
+        return {
+            'name': field['name'],
+            'args': [
+                {'name': arg['name'], 'type': _render_type_ref(arg.get('type'))}
+                for arg in (field.get('args') or [])
+            ],
+        }
+
+    matching = [describe(f) for f in fields if FLIGHT_FIELD_RE.search(f['name'])]
+
+    # 관심 필드의 인자로 쓰이는 입력 타입까지 펼쳐야 변수 구조를 알 수 있다
+    wanted = []
+    for field in matching:
+        for arg in field['args']:
+            name = arg['type'].strip('[]!')
+            if name not in wanted and name not in ('String', 'Int', 'Boolean', 'Float', 'ID'):
+                wanted.append(name)
+
+    input_types = {}
+    for name in wanted[:max_input_types]:
+        _, type_body = _post_graphql(INPUT_TYPE_QUERY, {'name': name}, timeout=timeout)
+        type_info = (type_body.get('data') or {}).get('__type') or {}
+        if type_info.get('inputFields'):
+            input_types[name] = [
+                {'name': f['name'], 'type': _render_type_ref(f.get('type'))}
+                for f in type_info['inputFields']
+            ]
+
+    return {
+        'introspection': 'ok',
+        'status': status,
+        'query_type': query_type.get('name'),
+        'field_count': len(fields),
+        'all_field_names': [f['name'] for f in fields],
+        'matching_fields': matching,
+        'input_types': input_types,
+    }
+
+
+def inspect_page(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
+    """검색 페이지가 어떤 이름으로 상태 JSON을 심는지 확인한다. (폴백 경로 진단)"""
+    departure, return_date = iter_weekend_trips()[0]
+    url = naver_flight_url(origin, destination, departure, return_date)
+    response = requests.get(url, headers=NAVER_PAGE_HEADERS, timeout=timeout)
+    return {
+        'status': response.status_code,
+        'bytes': len(response.content),
+        'state_vars': sorted(set(STATE_VAR_RE.findall(response.text))),
+    }
 
 
 def probe(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
