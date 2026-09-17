@@ -858,6 +858,13 @@ def api_flights_schema():
     except requests.RequestException as exc:
         report['page'] = {'error': str(exc)}
 
+    # introspection이 막혀 있으면 JS 번들에서 쿼리문을 직접 찾는다
+    if report['graphql'].get('introspection') != 'ok':
+        try:
+            report['bundle'] = flight_search.discover_queries()
+        except requests.RequestException as exc:
+            report['bundle'] = {'error': str(exc)}
+
     if request.args.get('telegram') == '1':
         send_telegram_message(
             '🧬 네이버 GraphQL 스키마\n<pre>'

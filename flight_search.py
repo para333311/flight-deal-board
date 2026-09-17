@@ -17,6 +17,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
+from urllib.parse import urljoin
 
 import requests
 
@@ -30,6 +31,10 @@ FETCH_CONCURRENCY = int(os.environ.get('FLIGHT_FETCH_CONCURRENCY', '4'))
 FETCH_TIMEOUT = int(os.environ.get('FLIGHT_FETCH_TIMEOUT', '20'))
 # 한 건도 못 가져온 채 이만큼 실패하면 수집을 접는다 (네이버가 막힌 경우)
 FAIL_FAST_AFTER = int(os.environ.get('FLIGHT_FAIL_FAST_AFTER', '15'))
+# 2박 3일을 알차게 쓰려면 갈 때는 오전, 올 때는 오후 비행기여야 한다.
+# 출발편은 이 시각 '전에' 출발, 복귀편은 이 시각 '이후에' 출발.
+OUTBOUND_LATEST_HOUR = int(os.environ.get('FLIGHT_OUTBOUND_LATEST_HOUR', '12'))
+INBOUND_EARLIEST_HOUR = int(os.environ.get('FLIGHT_INBOUND_EARLIEST_HOUR', '12'))
 TRIP_NIGHTS = 2  # 토요일 출발 → 월요일 귀국
 
 WEEKDAY_KO = ('월', '화', '수', '목', '금', '토', '일')
@@ -404,6 +409,77 @@ def introspect(timeout=FETCH_TIMEOUT, max_input_types=8):
     }
 
 
+SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
+# 번들에 문자열로 박혀 있는 GraphQL 오퍼레이션. introspection이 꺼져 있어도
+# 브라우저가 쓰는 쿼리문 자체는 JS 번들에 그대로 실려 온다.
+GQL_OPERATION_RE = re.compile(r'\b(query|mutation)\s+([A-Za-z_]\w*)\s*[({]')
+OPERATION_NAME_RE = re.compile(r'operationName\s*[:=]\s*["\']([A-Za-z_]\w*)["\']')
+
+
+def _extract_graphql_docs(text, interesting, doc_chars=1500, limit=5):
+    """번들 텍스트에서 GraphQL 오퍼레이션 정의를 잘라낸다."""
+    docs = []
+    for match in GQL_OPERATION_RE.finditer(text):
+        name = match.group(2)
+        if not interesting.search(name):
+            continue
+        snippet = text[match.start():match.start() + doc_chars]
+        docs.append({'operation': match.group(1), 'name': name, 'doc': snippet})
+        if len(docs) >= limit:
+            break
+    return docs
+
+
+def discover_queries(
+    origin=ORIGIN,
+    destination='NRT',
+    timeout=FETCH_TIMEOUT,
+    max_scripts=30,
+    max_bytes=6_000_000,
+):
+    """네이버 항공권 JS 번들에서 실제 GraphQL 쿼리문을 찾아낸다.
+
+    introspection이 막혀 있고 페이지에도 데이터가 없을 때 남은 유일한
+    자동 경로다. 브라우저가 보내는 쿼리문은 번들에 문자열로 들어 있다.
+    """
+    page_url = naver_flight_url(
+        origin, destination, *iter_weekend_trips()[0],
+    )
+    page = requests.get(page_url, headers=NAVER_PAGE_HEADERS, timeout=timeout)
+    sources = [urljoin(page_url, src) for src in SCRIPT_SRC_RE.findall(page.text)]
+
+    interesting = re.compile(r'internation|domestic|flight|air|fare|schedule', re.I)
+    operation_names = set(OPERATION_NAME_RE.findall(page.text))
+    docs = _extract_graphql_docs(page.text, interesting)
+
+    scanned = 0
+    budget = max_bytes
+    errors = []
+    for src in sources[:max_scripts]:
+        if budget <= 0:
+            break
+        try:
+            script = requests.get(src, headers=NAVER_PAGE_HEADERS, timeout=timeout)
+        except requests.RequestException as exc:
+            errors.append(f'{src.rsplit("/", 1)[-1]}: {exc}')
+            continue
+        scanned += 1
+        budget -= len(script.content)
+        body = script.text
+        operation_names.update(OPERATION_NAME_RE.findall(body))
+        if len(docs) < 5:
+            docs.extend(_extract_graphql_docs(body, interesting, limit=5 - len(docs)))
+
+    return {
+        'page_status': page.status_code,
+        'scripts_found': len(sources),
+        'scripts_scanned': scanned,
+        'operation_names': sorted(operation_names),
+        'graphql_docs': docs,
+        'errors': errors[:5],
+    }
+
+
 def inspect_page(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
     """검색 페이지가 어떤 이름으로 상태 JSON을 심는지 확인한다. (폴백 경로 진단)"""
     departure, return_date = iter_weekend_trips()[0]
@@ -508,6 +584,23 @@ def collect_offers(
     return offers, stats
 
 
+def matches_time_preference(
+    outbound_hour,
+    inbound_hour,
+    outbound_latest=OUTBOUND_LATEST_HOUR,
+    inbound_earliest=INBOUND_EARLIEST_HOUR,
+):
+    """갈 때 오전, 올 때 오후여야 2박 3일을 온전히 쓴다.
+
+    시각을 모르면 None을 돌려준다. 이때 후보를 버리지는 않는다 — 시간 정보를
+    못 얻었다는 이유로 전부 날리면 추천이 통째로 비기 때문이다. 대신 메시지에
+    '시간 미확인'으로 표시해 검증된 것과 구분한다.
+    """
+    if outbound_hour is None or inbound_hour is None:
+        return None
+    return outbound_hour < outbound_latest and inbound_hour >= inbound_earliest
+
+
 def pick_recommendations(
     offers,
     max_price=MAX_PRICE,
@@ -526,6 +619,9 @@ def pick_recommendations(
     city_used = {}
     for offer in sorted(offers, key=lambda o: (o['price'], o['depart'], o['city'])):
         if offer['price'] > max_price:
+            continue
+        # 오전 출발/오후 복귀가 아닌 게 확인된 편은 뺀다 (미확인은 통과)
+        if offer.get('time_ok') is False:
             continue
         if country_used.get(offer['country'], 0) >= per_country:
             continue
@@ -561,7 +657,8 @@ def format_digest(offers, max_price=MAX_PRICE, origin=ORIGIN, searched=0, stats=
 
     lines = [
         f'✈️ 토~월 2박3일 항공권 ({max_price:,}원 이하)',
-        f'{ORIGIN_NAMES.get(origin, origin)} 출발 · 나라당 최대 {PER_COUNTRY}곳 · 싼 순',
+        f'{ORIGIN_NAMES.get(origin, origin)} 출발 · 갈 때 오전/올 때 오후 · '
+        f'나라당 최대 {PER_COUNTRY}곳 · 싼 순',
     ]
     for index, offer in enumerate(offers, start=1):
         depart = offer['depart']
@@ -574,9 +671,14 @@ def format_digest(offers, max_price=MAX_PRICE, origin=ORIGIN, searched=0, stats=
         lines.append(
             f'{index}. <b>{offer["price"]:,}원</b> · {html.escape(where)}'
         )
+        out_hour, in_hour = offer.get('depart_hour'), offer.get('return_hour')
+        if out_hour is None or in_hour is None:
+            when = '시간 미확인'
+        else:
+            when = f'{out_hour:02d}시 출발 / {in_hour:02d}시 복귀'
         lines.append(
             f'   {depart:%m/%d}({WEEKDAY_KO[depart.weekday()]})~'
-            f'{back:%m/%d}({WEEKDAY_KO[back.weekday()]}) · '
+            f'{back:%m/%d}({WEEKDAY_KO[back.weekday()]}) · {when} · '
             f'<a href="{html.escape(offer["url"], quote=True)}">예약</a>'
         )
     return '\n'.join(lines)

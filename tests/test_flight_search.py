@@ -1,6 +1,7 @@
+import re
 import unittest
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import flight_search
 
@@ -325,6 +326,110 @@ class IntrospectionTests(unittest.TestCase):
 
         self.assertEqual(report["introspection"], "unavailable")
         self.assertIn("introspection is disabled", report["detail"])
+
+
+class TimePreferenceTests(unittest.TestCase):
+    """2박 3일을 알차게 쓰려면 갈 때 오전, 올 때 오후여야 한다."""
+
+    def test_morning_out_and_afternoon_back_is_accepted(self):
+        self.assertTrue(flight_search.matches_time_preference(8, 19))
+
+    def test_afternoon_departure_is_rejected(self):
+        self.assertFalse(flight_search.matches_time_preference(15, 19))
+
+    def test_morning_return_is_rejected(self):
+        self.assertFalse(flight_search.matches_time_preference(8, 9))
+
+    def test_boundary_noon(self):
+        # 정오 출발은 '오전'이 아니고, 정오 복귀는 '오후'로 친다
+        self.assertFalse(flight_search.matches_time_preference(12, 19))
+        self.assertTrue(flight_search.matches_time_preference(11, 12))
+
+    def test_unknown_times_are_undecided_not_rejected(self):
+        self.assertIsNone(flight_search.matches_time_preference(None, 19))
+        self.assertIsNone(flight_search.matches_time_preference(8, None))
+
+
+class TimeFilteringInPicksTests(unittest.TestCase):
+    def test_offers_known_to_violate_the_time_rule_are_dropped(self):
+        bad = dict(_offer(100000, "도쿄", "일본"), time_ok=False)
+        good = dict(_offer(200000, "오사카", "일본"), time_ok=True)
+
+        picked = flight_search.pick_recommendations([bad, good])
+
+        self.assertEqual([o["city"] for o in picked], ["오사카"])
+
+    def test_unknown_time_offers_still_get_through(self):
+        """시간 정보를 못 얻었다고 전부 버리면 추천이 통째로 빈다."""
+        unknown = dict(_offer(100000, "도쿄", "일본"), time_ok=None)
+
+        picked = flight_search.pick_recommendations([unknown])
+
+        self.assertEqual(len(picked), 1)
+
+    def test_message_shows_times_when_known(self):
+        offer = dict(_offer(150000, "후쿠오카", "일본"), depart_hour=8, return_hour=19)
+        message = flight_search.format_digest([offer])
+
+        self.assertIn("08시 출발 / 19시 복귀", message)
+
+    def test_message_marks_unknown_times_instead_of_pretending(self):
+        message = flight_search.format_digest([_offer(150000, "후쿠오카", "일본")])
+
+        self.assertIn("시간 미확인", message)
+
+
+class BundleDiscoveryTests(unittest.TestCase):
+    """introspection이 막혀 있어도 쿼리문은 JS 번들에 문자열로 실려 온다."""
+
+    def test_extracts_flight_related_operations_only(self):
+        bundle = (
+            'foo(){return e.query(query getInternationalFlightList($a: Int){ list { fare } })}'
+            'bar(){return e.query(query getUserProfile($b: Int){ name })}'
+        )
+        docs = flight_search._extract_graphql_docs(
+            bundle, re.compile(r"internation|flight", re.I)
+        )
+
+        self.assertEqual([d["name"] for d in docs], ["getInternationalFlightList"])
+        self.assertIn("fare", docs[0]["doc"])
+
+    def test_collects_operation_names_from_scripts(self):
+        page_html = '<script src="/js/main.js"></script>'
+        bundle = 'operationName:"getInternationalList",x=1,operationName:"getAirportList"'
+
+        responses = {
+            "page": Mock(status_code=200, text=page_html, content=b"x"),
+            "bundle": Mock(status_code=200, text=bundle, content=bundle.encode()),
+        }
+
+        def fake_get(url, **kwargs):
+            return responses["bundle"] if url.endswith("main.js") else responses["page"]
+
+        with patch.object(flight_search.requests, "get", side_effect=fake_get):
+            report = flight_search.discover_queries()
+
+        self.assertEqual(report["scripts_found"], 1)
+        self.assertEqual(report["scripts_scanned"], 1)
+        self.assertIn("getInternationalList", report["operation_names"])
+        self.assertIn("getAirportList", report["operation_names"])
+
+    def test_one_broken_script_does_not_abort_the_scan(self):
+        page_html = '<script src="/a.js"></script><script src="/b.js"></script>'
+
+        def fake_get(url, **kwargs):
+            if url.endswith("a.js"):
+                raise flight_search.requests.RequestException("boom")
+            if url.endswith("b.js"):
+                return Mock(status_code=200, text='operationName:"getFlight"', content=b"x")
+            return Mock(status_code=200, text=page_html, content=b"x")
+
+        with patch.object(flight_search.requests, "get", side_effect=fake_get):
+            report = flight_search.discover_queries()
+
+        self.assertEqual(report["scripts_scanned"], 1)
+        self.assertIn("getFlight", report["operation_names"])
+        self.assertTrue(report["errors"])
 
 
 class RenderTypeRefTests(unittest.TestCase):
