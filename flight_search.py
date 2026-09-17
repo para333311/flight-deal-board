@@ -29,7 +29,7 @@ from urllib.parse import urljoin
 # probe()/introspect() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면
 # Render가 아직 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다
 # 문자열을 새로 바꿔둔다.
-BUILD_MARKER = 'warm-session-2026-09-17'
+BUILD_MARKER = 'endpoint-discovery-2026-09-17'
 
 import requests
 
@@ -297,7 +297,7 @@ def warm_session(timeout=FETCH_TIMEOUT):
 
 def fetch_min_prices_by_date(
     origin, destination, trip_days, location_type=None, trip_type=None,
-    timeout=FETCH_TIMEOUT, session=None,
+    timeout=FETCH_TIMEOUT, session=None, endpoint=None,
 ):
     """도시 하나의 날짜별 최저가 목록을 한 번에 받아온다.
 
@@ -305,13 +305,17 @@ def fetch_min_prices_by_date(
     돌아오므로, 호출부(calibrate_min_prices_by_date/collect_offers)가 실제로
     행이 돌아오는 조합을 찾아 넘겨줘야 한다. session을 주지 않으면 쿠키 없는
     1회성 요청이 되므로, 보통은 warm_session()으로 만든 세션을 넘긴다.
+
+    endpoint를 바꿔 부를 수 있는 이유: 네이버는 기능별로 GraphQL 서버가
+    나뉘어 있을 수 있고, 엔드포인트가 틀리면 필드가 존재하는데도
+    "필드를 모른다"는 검증 오류가 난다 (discover_endpoints 참고).
     """
     variables = _min_prices_by_date_variables(
         origin, destination, trip_days, location_type, trip_type,
     )
     http = session or requests
     response = http.post(
-        NAVER_GRAPHQL_URL,
+        endpoint or NAVER_GRAPHQL_URL,
         json={'query': NAVER_MIN_PRICES_BY_DATE_QUERY, 'variables': variables},
         headers=NAVER_PAGE_HEADERS,
         timeout=timeout,
@@ -337,7 +341,7 @@ def fetch_min_prices_by_date(
 
 def calibrate_min_prices_by_date(
     origin=ORIGIN, destination='NRT', trip_days=TRIP_NIGHTS, timeout=FETCH_TIMEOUT,
-    session=None,
+    session=None, endpoint=None,
 ):
     """locationType/tripType 후보 중 실제로 행을 돌려주는 조합을 찾는다.
 
@@ -352,7 +356,7 @@ def calibrate_min_prices_by_date(
             try:
                 rows, diagnostic = fetch_min_prices_by_date(
                     origin, destination, trip_days, location_type, trip_type,
-                    timeout, session=session,
+                    timeout, session=session, endpoint=endpoint,
                 )
             except requests.RequestException as exc:
                 diagnostic = {'error': f'요청 실패: {exc}'}
@@ -365,6 +369,7 @@ def calibrate_min_prices_by_date(
             })
             if rows:
                 return {
+                    'endpoint': endpoint or NAVER_GRAPHQL_URL,
                     'location_type': location_type,
                     'trip_type': trip_type,
                     'sample': rows[:5],
@@ -617,6 +622,93 @@ def discover_queries(
     }
 
 
+# 번들에 박혀 있는 GraphQL 엔드포인트 주소를 찾기 위한 패턴.
+# 필드가 분명히 존재하는데도 "필드를 모른다"는 검증 오류가 난다면 보통
+# 엔드포인트가 틀린 것이다 — 네이버는 기능별로 GraphQL 서버가 나뉘어 있다.
+ABSOLUTE_GRAPHQL_URL_RE = re.compile(
+    r'https?://[a-zA-Z0-9.\-]+(?:/[a-zA-Z0-9._\-/]*)?graphql[a-zA-Z0-9._\-/]*'
+)
+RELATIVE_GRAPHQL_PATH_RE = re.compile(
+    r'["\'](/[a-zA-Z0-9._\-/]*graphql[a-zA-Z0-9._\-/]*)["\']'
+)
+NAVER_API_HOST_RE = re.compile(r'https?://([a-z0-9\-]+\.naver\.com)/[a-zA-Z0-9._\-/]*api')
+
+
+def discover_endpoints(
+    origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT,
+    max_scripts=30, max_bytes=6_000_000,
+):
+    """JS 번들에서 GraphQL 엔드포인트 후보 주소를 찾아낸다.
+
+    지금 쓰는 주소(airline-api.naver.com/graphql)는 추측이었다. 필드가
+    번들에 분명히 있는데도 검증 단계에서 거부된다면 주소가 틀렸을 가능성이
+    가장 크므로, 번들이 실제로 어디로 요청을 보내는지 직접 찾는다.
+    """
+    page_url = naver_flight_url(origin, destination, *iter_weekend_trips()[0])
+    page = requests.get(page_url, headers=NAVER_PAGE_HEADERS, timeout=timeout)
+    sources = [urljoin(page_url, src) for src in SCRIPT_SRC_RE.findall(page.text)]
+
+    absolute, relative, hosts = set(), set(), set()
+
+    def scan(text):
+        absolute.update(ABSOLUTE_GRAPHQL_URL_RE.findall(text))
+        relative.update(RELATIVE_GRAPHQL_PATH_RE.findall(text))
+        hosts.update(NAVER_API_HOST_RE.findall(text))
+
+    scan(page.text)
+    scanned = 0
+    budget = max_bytes
+    for src in sources[:max_scripts]:
+        if budget <= 0:
+            break
+        try:
+            script = requests.get(src, headers=NAVER_PAGE_HEADERS, timeout=timeout)
+        except requests.RequestException:
+            continue
+        scanned += 1
+        budget -= len(script.content)
+        scan(script.text)
+
+    # 상대 경로는 페이지 주소 기준으로 절대 주소로 바꿔 함께 시도한다
+    candidates = set(absolute)
+    candidates.update(urljoin(page_url, path) for path in relative)
+    return {
+        'scripts_scanned': scanned,
+        'absolute': sorted(absolute),
+        'relative': sorted(relative),
+        'api_hosts': sorted(hosts),
+        'candidates': sorted(candidates),
+    }
+
+
+def try_endpoints(
+    candidates, origin=ORIGIN, destination='NRT', trip_days=TRIP_NIGHTS,
+    timeout=FETCH_TIMEOUT, session=None,
+):
+    """후보 엔드포인트마다 실제로 쿼리를 던져보고 뭐가 통하는지 본다.
+
+    엔드포인트별로 조합을 다 돌리면 너무 오래 걸리므로 대표 조합
+    (AIRPORT/RT) 하나로만 먼저 훑는다. 통하는 주소를 찾으면 그 주소로
+    calibrate_min_prices_by_date()를 돌리면 된다.
+    """
+    session = session or warm_session(timeout)
+    results = []
+    for endpoint in candidates:
+        entry = {'endpoint': endpoint}
+        try:
+            rows, diagnostic = fetch_min_prices_by_date(
+                origin, destination, trip_days, 'AIRPORT', 'RT',
+                timeout, session=session, endpoint=endpoint,
+            )
+            entry.update(diagnostic)
+            entry['rows'] = len(rows) if rows else 0
+        except requests.RequestException as exc:
+            entry['error'] = f'요청 실패: {exc}'
+            entry['rows'] = 0
+        results.append(entry)
+    return results
+
+
 def inspect_page(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
     """검색 페이지가 어떤 이름으로 상태 JSON을 심는지 확인한다. (폴백 경로 진단)"""
     departure, return_date = iter_weekend_trips()[0]
@@ -636,14 +728,34 @@ def probe(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
     유일한 창구다. 성공하면 캘리브레이션 결과와 실제 표본 행을 돌려준다.
     """
     session = warm_session(timeout)
-    calibration, attempts = calibrate_min_prices_by_date(
-        origin=origin, destination=destination, timeout=timeout, session=session,
+
+    # 엔드포인트가 틀리면 필드가 있어도 "모르는 필드"로 거부되므로,
+    # 번들에서 실제 주소를 찾아 후보마다 던져보는 것을 먼저 한다.
+    discovered = discover_endpoints(origin=origin, destination=destination, timeout=timeout)
+    candidates = list(discovered['candidates'])
+    if NAVER_GRAPHQL_URL not in candidates:
+        candidates.append(NAVER_GRAPHQL_URL)
+    endpoint_results = try_endpoints(
+        candidates, origin=origin, destination=destination,
+        timeout=timeout, session=session,
     )
+
+    # 통하는 주소가 있으면 그 주소로 조합까지 찾아준다
+    working = next((r for r in endpoint_results if r.get('rows')), None)
+    calibration, attempts = None, []
+    if working:
+        calibration, attempts = calibrate_min_prices_by_date(
+            origin=origin, destination=destination, timeout=timeout,
+            session=session, endpoint=working['endpoint'],
+        )
+
     departure, return_date = iter_weekend_trips()[0]
     return {
         'build': BUILD_MARKER,
-        'query': NAVER_MIN_PRICES_BY_DATE_QUERY,
         'cookies_obtained': len(session.cookies),
+        'endpoints_found': discovered,
+        'endpoint_results': endpoint_results,
+        'working_endpoint': working['endpoint'] if working else None,
         'origin': origin,
         'destination': destination,
         'departure': f'{departure:%Y-%m-%d}',
@@ -750,8 +862,6 @@ def collect_offers(
     }
 
     # 세션을 한 번만 만들어 캘리브레이션과 도시별 요청 전체에서 재사용한다.
-    # (쿠키 없이 GraphQL만 두드리면 게이트웨이가 필드를 모르는 것처럼
-    # 취급한다 — warm_session 참고)
     session = warm_session()
     if calibration is None:
         calibration, _ = calibrate_min_prices_by_date(origin=origin, session=session)
@@ -765,7 +875,7 @@ def collect_offers(
             executor.submit(
                 fetch_min_prices_by_date, origin, dest['code'], TRIP_NIGHTS,
                 calibration['location_type'], calibration['trip_type'],
-                session=session,
+                session=session, endpoint=calibration.get('endpoint'),
             ): dest
             for dest in destinations
         }

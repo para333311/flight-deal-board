@@ -835,9 +835,20 @@ def api_flights_probe():
 
     report = flight_search.probe(destination=request.args.get('to', 'NRT'))
     if request.args.get('telegram') == '1':
+        # 전체를 보내면 메시지가 수십 개로 쪼개진다. 핵심만 추려 보낸다.
+        summary = {
+            'build': report.get('build'),
+            'working_endpoint': report.get('working_endpoint'),
+            'calibration': report.get('calibration'),
+            'candidates': report.get('endpoints_found', {}).get('candidates'),
+            'endpoint_results': [
+                {k: v for k, v in r.items() if k != 'snippet'}
+                for r in report.get('endpoint_results', [])
+            ],
+        }
         send_telegram_message(
             '🔎 네이버 항공권 진단\n<pre>'
-            + html.escape(json.dumps(report, ensure_ascii=False, indent=2))
+            + html.escape(json.dumps(summary, ensure_ascii=False, indent=1))
             + '</pre>'
         )
     return jsonify({'success': True, **report})
