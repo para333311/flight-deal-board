@@ -17,6 +17,7 @@ return_hour는 항상 None이고, '오전 출발/오후 복귀' 조건은 아직
 """
 
 import calendar
+import hashlib
 import html
 import json
 import os
@@ -29,7 +30,7 @@ from urllib.parse import urljoin
 # probe()/introspect() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면
 # Render가 아직 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다
 # 문자열을 새로 바꿔둔다.
-BUILD_MARKER = 'endpoint-discovery-2026-09-17'
+BUILD_MARKER = 'persisted-query-2026-09-17'
 
 import requests
 
@@ -210,8 +211,7 @@ NAVER_PAGE_HEADERS = {
 # 이 쿼리의 응답에는 시각(오전/오후) 정보가 없다 — departureDate/returnDate/
 # minPrice/tripType뿐이다. 그래서 '오전 출발/오후 복귀' 조건은 아직 검증할
 # 수 없고, depart_hour/return_hour는 항상 None(시간 미확인)으로 남는다.
-NAVER_MIN_PRICES_BY_DATE_QUERY = """
-query minPricesByDate(
+NAVER_MIN_PRICES_BY_DATE_QUERY = """query minPricesByDate(
   $departureLocationCode: String
   $departureLocationType: String
   $arrivalLocationCode: String
@@ -240,6 +240,23 @@ query minPricesByDate(
   }
 }
 """
+
+# Apollo Client의 Automatic Persisted Queries(APQ) 대비. 정확히 있는
+# 필드(minPricesByDate)인데도 매번 같은 위치에서 "모르는 필드"처럼 거부되는
+# 게, 게이트웨이가 APQ를 강제해서 등록 안 된 쿼리 문서를 통째로 무시하고
+# 정체를 숨기는 뻔한 오류만 돌려주는 것일 수 있다. 번들에서 뽑은 쿼리
+# 텍스트는 원문 그대로(줄바꿈까지 동일)라 sha256이 실제 클라이언트가 보내는
+# 해시와 같을 가능성이 있다 — 그렇다면 서버가 이미 캐시된 걸로 인식해
+# 실행해준다. 지원 안 하는 서버라면 extensions를 그냥 무시하므로 손해가
+# 없다.
+PERSISTED_QUERY_EXTENSIONS = {
+    'persistedQuery': {
+        'version': 1,
+        'sha256Hash': hashlib.sha256(
+            NAVER_MIN_PRICES_BY_DATE_QUERY.encode('utf-8')
+        ).hexdigest(),
+    },
+}
 
 # locationType/tripType는 문자열 인자라 GraphQL이 유효값을 검증해주지 않는다
 # (틀려도 에러가 아니라 그냥 빈 결과로 조용히 돌아온다). 그래서 실제로 결과가
@@ -316,7 +333,11 @@ def fetch_min_prices_by_date(
     http = session or requests
     response = http.post(
         endpoint or NAVER_GRAPHQL_URL,
-        json={'query': NAVER_MIN_PRICES_BY_DATE_QUERY, 'variables': variables},
+        json={
+            'query': NAVER_MIN_PRICES_BY_DATE_QUERY,
+            'variables': variables,
+            'extensions': PERSISTED_QUERY_EXTENSIONS,
+        },
         headers=NAVER_PAGE_HEADERS,
         timeout=timeout,
     )
@@ -625,11 +646,14 @@ def discover_queries(
 # 번들에 박혀 있는 GraphQL 엔드포인트 주소를 찾기 위한 패턴.
 # 필드가 분명히 존재하는데도 "필드를 모른다"는 검증 오류가 난다면 보통
 # 엔드포인트가 틀린 것이다 — 네이버는 기능별로 GraphQL 서버가 나뉘어 있다.
+# "graphql"이 다른 단어에 붙어 있으면(예: apolloGRAPHQL 조직명) 제외해야
+# 한다 — 첫 시도에서 apollographql/invariant-packages 같은 오탐이 나왔다.
 ABSOLUTE_GRAPHQL_URL_RE = re.compile(
-    r'https?://[a-zA-Z0-9.\-]+(?:/[a-zA-Z0-9._\-/]*)?graphql[a-zA-Z0-9._\-/]*'
+    r'https?://[a-zA-Z0-9.\-]+(?:/[a-zA-Z0-9._\-]*)*/'
+    r'(?<![a-zA-Z])graphql(?![a-zA-Z])[a-zA-Z0-9._\-/]*'
 )
 RELATIVE_GRAPHQL_PATH_RE = re.compile(
-    r'["\'](/[a-zA-Z0-9._\-/]*graphql[a-zA-Z0-9._\-/]*)["\']'
+    r'["\'](/[a-zA-Z0-9._\-/]*/(?<![a-zA-Z])graphql(?![a-zA-Z])[a-zA-Z0-9._\-/]*)["\']'
 )
 NAVER_API_HOST_RE = re.compile(r'https?://([a-z0-9\-]+\.naver\.com)/[a-zA-Z0-9._\-/]*api')
 
