@@ -549,6 +549,67 @@ class BundleDiscoveryTests(unittest.TestCase):
         self.assertTrue(report["errors"])
 
 
+class EndpointDiscoveryTests(unittest.TestCase):
+    """필드가 번들에 있는데도 '모르는 필드'라면 보통 엔드포인트가 틀린 것이다."""
+
+    def test_finds_absolute_and_relative_graphql_urls(self):
+        page_html = '<script src="/js/main.js"></script>'
+        bundle = (
+            'var a="https://airline-api.naver.com/graphql";'
+            'var b="https://flight-api.naver.com/v1/graphql";'
+            'fetch("/api/flight/graphql",{})'
+        )
+
+        def fake_get(url, **kwargs):
+            text = bundle if url.endswith('main.js') else page_html
+            return Mock(status_code=200, text=text, content=text.encode())
+
+        with patch.object(flight_search.requests, "get", side_effect=fake_get):
+            found = flight_search.discover_endpoints()
+
+        self.assertIn("https://airline-api.naver.com/graphql", found["absolute"])
+        self.assertIn("https://flight-api.naver.com/v1/graphql", found["absolute"])
+        self.assertIn("/api/flight/graphql", found["relative"])
+        # 상대 경로는 절대 주소로 바뀌어 후보에 들어간다
+        self.assertTrue(
+            any(c.endswith("/api/flight/graphql") and c.startswith("https://")
+                for c in found["candidates"])
+        )
+
+    def test_tries_each_candidate_and_reports_which_returned_rows(self):
+        def fake_fetch(origin, destination, trip_days, location_type, trip_type,
+                       timeout=None, session=None, endpoint=None):
+            if endpoint == "https://good.example/graphql":
+                return [{"departureDate": "20261010", "minPrice": 1000}], {"status": 200}
+            return None, {"status": 400, "error": "GraphQL 오류"}
+
+        with patch.object(flight_search, "fetch_min_prices_by_date", side_effect=fake_fetch), \
+             patch.object(flight_search, "warm_session", return_value=Mock()):
+            results = flight_search.try_endpoints(
+                ["https://bad.example/graphql", "https://good.example/graphql"]
+            )
+
+        self.assertEqual(results[0]["rows"], 0)
+        self.assertEqual(results[1]["rows"], 1)
+        self.assertEqual(results[1]["endpoint"], "https://good.example/graphql")
+
+    def test_endpoint_request_failure_does_not_abort_the_sweep(self):
+        def fake_fetch(origin, destination, trip_days, location_type, trip_type,
+                       timeout=None, session=None, endpoint=None):
+            if endpoint == "https://dead.example/graphql":
+                raise flight_search.requests.RequestException("boom")
+            return [{"departureDate": "20261010", "minPrice": 1000}], {"status": 200}
+
+        with patch.object(flight_search, "fetch_min_prices_by_date", side_effect=fake_fetch), \
+             patch.object(flight_search, "warm_session", return_value=Mock()):
+            results = flight_search.try_endpoints(
+                ["https://dead.example/graphql", "https://ok.example/graphql"]
+            )
+
+        self.assertIn("요청 실패", results[0]["error"])
+        self.assertEqual(results[1]["rows"], 1)
+
+
 class RenderTypeRefTests(unittest.TestCase):
     def test_unwraps_non_null_and_list_wrappers(self):
         ref = _type_ref(
