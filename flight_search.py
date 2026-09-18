@@ -26,13 +26,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin
 
-# 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
-# probe()/introspect() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면
-# Render가 아직 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다
-# 문자열을 새로 바꿔둔다.
-BUILD_MARKER = 'persisted-query-2026-09-17'
-
 import requests
+
+# 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
+# probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
+# 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
+BUILD_MARKER = 'host-sweep-2026-09-18'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -655,7 +654,16 @@ ABSOLUTE_GRAPHQL_URL_RE = re.compile(
 RELATIVE_GRAPHQL_PATH_RE = re.compile(
     r'["\'](/[a-zA-Z0-9._\-/]*/(?<![a-zA-Z])graphql(?![a-zA-Z])[a-zA-Z0-9._\-/]*)["\']'
 )
-NAVER_API_HOST_RE = re.compile(r'https?://([a-z0-9\-]+\.naver\.com)/[a-zA-Z0-9._\-/]*api')
+# 실제 GraphQL 주소는 번들에 문자열로 안 박혀 있고(상대경로 "/graphql"만
+# 나온다) 런타임 설정으로 주입되는 것으로 보인다. 그래서 번들에 등장하는
+# 네이버 호스트를 전부 긁어 "<host>/graphql" 식으로 조합해 시도한다.
+NAVER_HOST_RE = re.compile(r'https?://((?:[a-z0-9\-]+\.)+naver\.com)')
+# Apollo HttpLink 설정(uri: "...")에서 주소를 직접 집어내기 위한 패턴
+APOLLO_URI_RE = re.compile(r'uri\s*:\s*["\']([^"\']{4,200})["\']')
+# 호스트 하나당 붙여볼 경로들
+GRAPHQL_PATH_GUESSES = ('/graphql', '/api/graphql')
+# 요청 폭주를 막기 위한 상한 (네이버가 이미 503을 준 적이 있다)
+MAX_ENDPOINT_TRIES = 14
 
 
 def discover_endpoints(
@@ -672,12 +680,16 @@ def discover_endpoints(
     page = requests.get(page_url, headers=NAVER_PAGE_HEADERS, timeout=timeout)
     sources = [urljoin(page_url, src) for src in SCRIPT_SRC_RE.findall(page.text)]
 
-    absolute, relative, hosts = set(), set(), set()
+    absolute, relative, hosts, uris = set(), set(), set(), set()
 
     def scan(text):
         absolute.update(ABSOLUTE_GRAPHQL_URL_RE.findall(text))
         relative.update(RELATIVE_GRAPHQL_PATH_RE.findall(text))
-        hosts.update(NAVER_API_HOST_RE.findall(text))
+        hosts.update(NAVER_HOST_RE.findall(text))
+        uris.update(
+            u for u in APOLLO_URI_RE.findall(text)
+            if 'graphql' in u.lower() or u.startswith('http')
+        )
 
     scan(page.text)
     scanned = 0
@@ -696,12 +708,30 @@ def discover_endpoints(
     # 상대 경로는 페이지 주소 기준으로 절대 주소로 바꿔 함께 시도한다
     candidates = set(absolute)
     candidates.update(urljoin(page_url, path) for path in relative)
+    candidates.update(urljoin(page_url, uri) for uri in uris)
+    # 주소가 번들에 안 박혀 있으므로, 등장한 네이버 호스트에 흔한 경로를
+    # 붙여 조합한다. 항공권과 관련 있어 보이는 호스트를 먼저 시도한다.
+    def host_rank(host):
+        return (
+            0 if any(k in host for k in ('flight', 'air', 'travel')) else 1,
+            len(host),
+        )
+
+    # 번들에 박힌 주소를 먼저, 그다음 호스트 조합을 항공권 관련 순으로.
+    ordered = list(candidates)
+    for host in sorted(hosts, key=host_rank):
+        for path in GRAPHQL_PATH_GUESSES:
+            guess = f'https://{host}{path}'
+            if guess not in ordered:
+                ordered.append(guess)
+
     return {
         'scripts_scanned': scanned,
+        'naver_hosts': sorted(hosts),
+        'apollo_uris': sorted(uris),
         'absolute': sorted(absolute),
         'relative': sorted(relative),
-        'api_hosts': sorted(hosts),
-        'candidates': sorted(candidates),
+        'candidates': ordered[:MAX_ENDPOINT_TRIES],
     }
 
 

@@ -576,6 +576,47 @@ class EndpointDiscoveryTests(unittest.TestCase):
                 for c in found["candidates"])
         )
 
+    def test_builds_candidates_from_every_naver_host_found(self):
+        """실제 주소는 번들에 안 박혀 있고 런타임 설정으로 주입된다.
+        그래서 등장한 네이버 호스트에 흔한 경로를 붙여 조합해 시도한다."""
+        page_html = '<script src="/js/main.js"></script>'
+        bundle = (
+            'var a="https://api.flight.naver.com/x";'
+            'var b="https://airline-api.naver.com/y";'
+            'var c="https://nfront.pstatic.net/z";'
+        )
+
+        def fake_get(url, **kwargs):
+            text = bundle if url.endswith('main.js') else page_html
+            return Mock(status_code=200, text=text, content=text.encode())
+
+        with patch.object(flight_search.requests, "get", side_effect=fake_get):
+            found = flight_search.discover_endpoints()
+
+        # 다단계 서브도메인도 잡아야 한다
+        self.assertIn("api.flight.naver.com", found["naver_hosts"])
+        # 네이버가 아닌 호스트(pstatic)는 후보에 넣지 않는다
+        self.assertFalse(any("pstatic" in c for c in found["candidates"]))
+        self.assertIn("https://api.flight.naver.com/graphql", found["candidates"])
+        # 항공권 관련 호스트가 앞쪽에 온다
+        self.assertTrue(found["candidates"][0].startswith("https://api.flight.naver.com"))
+
+    def test_candidate_count_is_capped_to_avoid_hammering(self):
+        """네이버가 이미 503을 준 적이 있어 요청 폭주를 막아야 한다."""
+        page_html = '<script src="/js/main.js"></script>'
+        bundle = ''.join(f'var x{i}="https://h{i}.naver.com/a";' for i in range(40))
+
+        def fake_get(url, **kwargs):
+            text = bundle if url.endswith('main.js') else page_html
+            return Mock(status_code=200, text=text, content=text.encode())
+
+        with patch.object(flight_search.requests, "get", side_effect=fake_get):
+            found = flight_search.discover_endpoints()
+
+        self.assertLessEqual(
+            len(found["candidates"]), flight_search.MAX_ENDPOINT_TRIES
+        )
+
     def test_tries_each_candidate_and_reports_which_returned_rows(self):
         def fake_fetch(origin, destination, trip_days, location_type, trip_type,
                        timeout=None, session=None, endpoint=None):
