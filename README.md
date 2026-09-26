@@ -46,6 +46,7 @@ HTML에 링크된 스크립트가 아니라 검색을 실행할 때 동적으로
 | `FLIGHT_PER_COUNTRY` | `3` | 나라당 추천 개수 |
 | `FLIGHT_PER_CITY` | `1` | 도시당 추천 개수 |
 | `FLIGHT_MAX_RESULTS` | `20` | 메시지에 담을 총 개수 |
+| `FLIGHT_DIGEST_ENABLED` | `false` | 항공권 추천 발송 켜기. 2026-09-26 네이버 수집 0건이 사흘 이어져 **꺼 둠** — 다시 할 때 `true` |
 | `FLIGHT_DIGEST_TIMES` | `09:00` | 발송 시각 (KST, 콤마 구분) |
 | `FLIGHT_FETCH_CONCURRENCY` | `4` | 동시 요청 수 |
 | `FLIGHT_FAIL_FAST_AFTER` | `15` | 한 건도 못 가져온 채 이만큼 실패하면 중단 |

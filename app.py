@@ -32,6 +32,9 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # 주말 항공권 추천을 보낼 시각 (KST, 콤마 구분). 하루 한 번이면 충분하다 —
 # 3개월치 × 도시 수만큼 네이버에 요청하므로 자주 돌릴수록 차단 위험이 커진다.
 FLIGHT_DIGEST_TIMES = os.environ.get('FLIGHT_DIGEST_TIMES', '09:00')
+# 2026-09-26 파라님 「이건 멈추자. 담에 다시 할 때까지」 — 네이버 수집이 9/24~26 사흘 연속 0건이라 실패 알림만 나갔다.
+# 다시 켤 때는 Render 환경변수 FLIGHT_DIGEST_ENABLED=true (또는 여기 기본값을 'true' 로).
+FLIGHT_DIGEST_ENABLED = os.environ.get('FLIGHT_DIGEST_ENABLED', 'false').lower() == 'true'
 # canonicalize_url()에서 제거하는 추적용 쿼리 파라미터 (동일 글이 utm 값만
 # 달라 다른 링크로 취급되어 중복 알림이 나가는 것을 막는다)
 TRACKING_QUERY_PARAMS = {
@@ -717,7 +720,7 @@ init_db()
 
 # gunicorn 배포에서도 알림이 돌도록 모듈 로드 시점에 잡을 등록한다.
 # (텔레그램 미설정 상태나 테스트 실행 중에는 등록하지 않음)
-if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and FLIGHT_DIGEST_ENABLED:
     for index, digest_time in enumerate(split_keywords(FLIGHT_DIGEST_TIMES)):
         try:
             hour, minute = digest_time.split(':')
