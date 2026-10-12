@@ -31,16 +31,21 @@ Flask 앱. Render에 `main` 브랜치가 배포된다. 두 기능이 한 앱에 
     README를 먼저 참고할 것.
 - `flight_search.py` — 항공권 검색. 앱 설정에 의존하지 않게 짜여 있어
   (`run_weekend_flight_digest`가 발송 함수를 인자로 받는다) 테스트가 쉽다.
-  - **개발 환경에서는 네이버로 나갈 수 없다** (egress 차단). 실제 사용하는
-    쿼리(`minPricesByDate`)는 JS 번들 스캔(`discover_queries`)으로 확보했고,
-    실물 응답은 배포 후 `/api/flights/probe`(캘리브레이션 결과)와
-    `/api/flights/schema`(번들 스캔)로만 확인할 수 있다.
-  - `minPricesByDate`는 도시 하나당 한 번만 불러도 여러 날짜의 최저가를
-    돌려준다. 그래서 `collect_offers`는 (도시 × 날짜) 조합이 아니라
-    **도시 단위로만** 요청한다 — 다시 (도시×날짜) 루프로 되돌리지 말 것.
-  - `departureLocationType`/`arrivalLocationType`/`tripType`은 문자열이라
-    틀려도 에러 없이 빈 결과만 온다. `calibrate_min_prices_by_date()`가
-    실제로 행이 오는 조합을 찾아 재사용한다.
+  - **개발 환경에서는 네이버로 나갈 수 없다** (egress 차단). 실물 응답은
+    배포 후 Render 로그(기동 진단)나 `/api/flights/probe`,
+    `/api/flights/schema`로만 확인할 수 있다. Render MCP의 `list_logs`로
+    로그를 직접 읽을 수 있으니, 사람에게 결과를 받아오게 하지 말고
+    로그 기반으로 진단할 것.
+  - **엔드포인트**: `https://flight-api.naver.com/graphql` (2026-10-12 확정).
+    다른 naver.com 호스트는 404/503이거나 전혀 다른 서비스다 — 추측으로
+    바꾸지 말 것.
+  - **통하는 변수 조합** (`_min_prices_by_date_variables`): `tripType: 'RT'`
+    + `groupByDepartureDate: False`. 자세한 근거는 `README.md`.
+    - `isNonstop`은 넣는 순간 결과가 통째로 빈다 — 절대 넣지 말 것.
+    - `tripDays`는 무시된다. 2박 3일은 `pick_return_row()`가 복귀일 +2일
+      행을 골라서 맞춘다.
+    - `groupByDepartureDate: True`로 바꾸면 일정 길이를 못 고른다. 그래서
+      `collect_offers`는 (도시 × 토요일)마다 한 번씩 요청한다.
   - 이 쿼리는 **시각을 주지 않는다** — `depart_hour`/`return_hour`는 항상
     `None`이고 '오전 출발/오후 복귀' 조건은 아직 검증 못 한다. 시간 정보가
     없다고 후보를 버리면 안 되고(추천이 통째로 빔), 메시지에 '시간

@@ -227,107 +227,69 @@ class ParseApiValueTests(unittest.TestCase):
         self.assertIsNone(flight_search._parse_api_price(None))
 
 
-class RowsToOffersTests(unittest.TestCase):
+class PickReturnRowTests(unittest.TestCase):
+    """응답은 복귀일별로 한 줄씩 오므로 2박 3일에 해당하는 줄만 골라야 한다."""
+
+    ROWS = [
+        {"departureDate": "20261017", "returnDate": "20261017", "minPrice": 371680},
+        {"departureDate": "20261017", "returnDate": "20261018", "minPrice": 358300},
+        {"departureDate": "20261017", "returnDate": "20261019", "minPrice": 345500},
+        {"departureDate": "20261017", "returnDate": "20261020", "minPrice": 328700},
+    ]
+
+    def test_picks_the_row_two_nights_later(self):
+        row = flight_search.pick_return_row(self.ROWS, date(2026, 10, 17))
+
+        # 더 싼 20일(3박) 대신 조건에 맞는 19일(2박)을 골라야 한다
+        self.assertEqual(row["returnDate"], "20261019")
+        self.assertEqual(row["minPrice"], 345500)
+
+    def test_returns_none_when_the_wanted_return_date_is_absent(self):
+        rows = [{"departureDate": "20261017", "returnDate": "20261025", "minPrice": 100}]
+        self.assertIsNone(flight_search.pick_return_row(rows, date(2026, 10, 17)))
+
+    def test_empty_rows_are_not_a_crash(self):
+        self.assertIsNone(flight_search.pick_return_row(None, date(2026, 10, 17)))
+        self.assertIsNone(flight_search.pick_return_row([], date(2026, 10, 17)))
+
+
+class BuildOfferTests(unittest.TestCase):
     DEST = {"code": "FUK", "city": "후쿠오카", "country": "일본"}
-    TRIPS = [(date(2026, 10, 10), date(2026, 10, 12)), (date(2026, 10, 17), date(2026, 10, 19))]
 
-    def test_keeps_only_rows_matching_our_saturdays(self):
-        rows = [
-            {"departureDate": "20261010", "returnDate": "20261012", "minPrice": 150000},
-            # 우리가 조회하지 않은 날짜 (평일 출발) — API가 넓은 기간을 줬을 때 걸러야 함
-            {"departureDate": "20261013", "returnDate": "20261015", "minPrice": 90000},
-        ]
-        offers = flight_search.rows_to_offers(rows, self.DEST, "ICN", self.TRIPS)
+    def test_builds_offer_with_link_and_unknown_times(self):
+        offer = flight_search.build_offer(
+            {"minPrice": 345500}, self.DEST, "ICN",
+            date(2026, 10, 17), date(2026, 10, 19),
+        )
 
-        self.assertEqual(len(offers), 1)
-        self.assertEqual(offers[0]["depart"], date(2026, 10, 10))
-        self.assertEqual(offers[0]["price"], 150000)
-
-    def test_drops_rows_whose_trip_length_does_not_match(self):
-        """tripDays=2로 요청해도 응답에 다른 일정이 섞여 오면 걸러낸다."""
-        rows = [{"departureDate": "20261010", "returnDate": "20261015", "minPrice": 150000}]
-        offers = flight_search.rows_to_offers(rows, self.DEST, "ICN", self.TRIPS)
-        self.assertEqual(offers, [])
-
-    def test_missing_return_date_falls_back_to_nights_later(self):
-        rows = [{"departureDate": "20261010", "minPrice": 150000}]
-        offers = flight_search.rows_to_offers(rows, self.DEST, "ICN", self.TRIPS)
-        self.assertEqual(offers[0]["return"], date(2026, 10, 12))
-
-    def test_keeps_cheapest_when_a_date_appears_twice(self):
-        rows = [
-            {"departureDate": "20261010", "returnDate": "20261012", "minPrice": 200000},
-            {"departureDate": "20261010", "returnDate": "20261012", "minPrice": 150000},
-        ]
-        offers = flight_search.rows_to_offers(rows, self.DEST, "ICN", self.TRIPS)
-        self.assertEqual(len(offers), 1)
-        self.assertEqual(offers[0]["price"], 150000)
-
-    def test_time_fields_are_unknown_not_guessed(self):
-        """이 쿼리는 시각을 안 준다 — 모르는 걸 아는 척하면 안 된다."""
-        rows = [{"departureDate": "20261010", "returnDate": "20261012", "minPrice": 150000}]
-        offer = flight_search.rows_to_offers(rows, self.DEST, "ICN", self.TRIPS)[0]
+        self.assertEqual(offer["price"], 345500)
+        self.assertEqual(offer["city"], "후쿠오카")
+        self.assertIn("ICN-FUK-20261017", offer["url"])
+        # 이 응답에는 시각이 없다 — 모르는 걸 아는 척하면 안 된다
         self.assertIsNone(offer["depart_hour"])
-        self.assertIsNone(offer["return_hour"])
         self.assertIsNone(offer["time_ok"])
 
-    def test_rows_missing_price_or_date_are_skipped(self):
-        rows = [
-            {"departureDate": "20261010", "returnDate": "20261012"},
-            {"returnDate": "20261012", "minPrice": 150000},
-        ]
-        self.assertEqual(flight_search.rows_to_offers(rows, self.DEST, "ICN", self.TRIPS), [])
+    def test_row_without_price_is_not_an_offer(self):
+        self.assertIsNone(flight_search.build_offer(
+            {}, self.DEST, "ICN", date(2026, 10, 17), date(2026, 10, 19),
+        ))
 
 
-class CalibrateMinPricesByDateTests(unittest.TestCase):
-    def setUp(self):
-        # warm_session()의 실제 네트워크 시도를 막아 테스트를 빠르고
-        # 결정적으로 만든다 — fetch_min_prices_by_date 자체는 모킹하므로
-        # 세션 내용은 테스트와 무관하다.
-        patcher = patch.object(flight_search, "warm_session", return_value=Mock())
-        patcher.start()
-        self.addCleanup(patcher.stop)
+class MinPricesVariablesTests(unittest.TestCase):
+    """2026-10-12 실험으로 확정한 조합에서 벗어나면 결과가 빈다."""
 
-    def test_stops_at_the_first_combo_that_returns_rows(self):
-        calls = []
+    def test_uses_group_false_and_omits_the_params_that_break_it(self):
+        variables = flight_search._min_prices_by_date_variables(
+            "ICN", "FUK", date(2026, 10, 17),
+        )
 
-        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout, **kwargs):
-            calls.append((location_type, trip_type))
-            if location_type == "CITY" and trip_type == "RT":
-                return [{"departureDate": "20261010", "minPrice": 1000}], {"status": 200}
-            return None, {"status": 200, "error": "결과 없음"}
-
-        with patch.object(flight_search, "fetch_min_prices_by_date", side_effect=fake_fetch):
-            calibration, attempts = flight_search.calibrate_min_prices_by_date()
-
-        self.assertEqual(calibration["location_type"], "CITY")
-        self.assertEqual(calibration["trip_type"], "RT")
-        self.assertEqual(calibration["sample"][0]["minPrice"], 1000)
-        # CITY/RT에서 멈췄으니 그 이후 조합은 시도하지 않는다
-        self.assertNotIn(("CITY", "ROUND_TRIP"), calls)
-
-    def test_reports_every_attempt_when_nothing_works(self):
-        with patch.object(
-            flight_search, "fetch_min_prices_by_date",
-            return_value=(None, {"status": 400, "error": "결과 없음"}),
-        ):
-            calibration, attempts = flight_search.calibrate_min_prices_by_date()
-
-        self.assertIsNone(calibration)
-        expected = len(flight_search.LOCATION_TYPE_CANDIDATES) * len(flight_search.TRIP_TYPE_CANDIDATES)
-        self.assertEqual(len(attempts), expected)
-
-    def test_network_error_in_one_combo_does_not_abort_calibration(self):
-        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout, **kwargs):
-            if location_type == "AIRPORT":
-                raise flight_search.requests.RequestException("boom")
-            return [{"departureDate": "20261010", "minPrice": 1000}], {"status": 200}
-
-        with patch.object(flight_search, "fetch_min_prices_by_date", side_effect=fake_fetch):
-            calibration, attempts = flight_search.calibrate_min_prices_by_date()
-
-        self.assertIsNotNone(calibration)
-        self.assertTrue(any("요청 실패" in str(a.get("error", "")) for a in attempts))
+        # groupByDepartureDate=False 여야 복귀일별로 행이 온다
+        self.assertIs(variables["groupByDepartureDate"], False)
+        self.assertEqual(variables["departureDate"], "20261017")
+        # isNonstop을 넣으면 결과가 통째로 빈다
+        self.assertNotIn("isNonstop", variables)
+        # tripDays는 무시되므로 보내지 않는다
+        self.assertNotIn("tripDays", variables)
 
 
 def _type_ref(kind, name=None, of_type=None):
@@ -667,8 +629,6 @@ class RenderTypeRefTests(unittest.TestCase):
 
 
 class CollectOffersTests(unittest.TestCase):
-    CALIBRATION = {"location_type": "CITY", "trip_type": "RT", "sample": []}
-
     def setUp(self):
         patcher = patch.object(flight_search, "warm_session", return_value=Mock())
         patcher.start()
@@ -681,14 +641,17 @@ class CollectOffersTests(unittest.TestCase):
             {"code": "BKK", "city": "방콕", "country": "태국"},
         )
 
-        def fake_fetch(origin, destination, trip_days, location_type, trip_type, timeout=None, **kwargs):
+        def fake_fetch(origin, destination, departure, timeout=None, **kwargs):
             price = 150000 if destination == "FUK" else 900000
-            return [{"departureDate": "20261010", "returnDate": "20261012", "minPrice": price}], {}
+            return [
+                # 같은 날 복귀(0박)도 섞여 오므로 2박짜리를 골라야 한다
+                {"departureDate": "20261010", "returnDate": "20261010", "minPrice": 50000},
+                {"departureDate": "20261010", "returnDate": "20261012", "minPrice": price},
+            ], {}
 
         with patch.object(flight_search, "fetch_min_prices_by_date", side_effect=fake_fetch):
             offers, stats = flight_search.collect_offers(
                 destinations=destinations, trips=trips, max_price=400000,
-                calibration=self.CALIBRATION,
             )
 
         self.assertEqual(len(offers), 1)
@@ -700,8 +663,26 @@ class CollectOffersTests(unittest.TestCase):
         self.assertEqual(stats["succeeded"], 2)
         self.assertEqual(stats["failed"], 0)
 
+    def test_requests_each_saturday_separately(self):
+        """한 번의 호출은 출발일 하나만 담당하므로 토요일마다 따로 부른다."""
+        trips = [
+            (date(2026, 10, 10), date(2026, 10, 12)),
+            (date(2026, 10, 17), date(2026, 10, 19)),
+        ]
+        destinations = ({"code": "FUK", "city": "후쿠오카", "country": "일본"},)
+        asked = []
+
+        def fake_fetch(origin, destination, departure, timeout=None, **kwargs):
+            asked.append(departure)
+            return [], {}
+
+        with patch.object(flight_search, "fetch_min_prices_by_date", side_effect=fake_fetch):
+            flight_search.collect_offers(destinations=destinations, trips=trips)
+
+        self.assertEqual(sorted(asked), [date(2026, 10, 10), date(2026, 10, 17)])
+
     def test_gives_up_early_when_nothing_can_be_collected(self):
-        """네이버가 막혔을 때 도시 수십 개를 타임아웃마다 기다리지 않는다."""
+        """네이버가 막혔을 때 수백 건을 타임아웃마다 기다리지 않는다."""
         trips = [(date(2026, 10, day), date(2026, 10, day + 2)) for day in (3, 10, 17)]
         destinations = tuple(
             {"code": f"C{i}", "city": f"도시{i}", "country": f"나라{i}"} for i in range(20)
@@ -710,28 +691,11 @@ class CollectOffersTests(unittest.TestCase):
         with patch.object(flight_search, "fetch_min_prices_by_date", return_value=(None, {})):
             offers, stats = flight_search.collect_offers(
                 destinations=destinations, trips=trips, fail_fast_after=5,
-                calibration=self.CALIBRATION,
             )
 
         self.assertEqual(offers, [])
         self.assertTrue(stats["aborted"])
         self.assertLess(stats["attempted"], stats["total"])
-
-    def test_calibration_failure_aborts_immediately_without_any_requests(self):
-        """조합을 하나도 못 찾으면(캘리브레이션 실패) 도시 요청 자체를 안 보낸다."""
-        with patch.object(
-            flight_search, "calibrate_min_prices_by_date", return_value=(None, []),
-        ), patch.object(
-            flight_search, "fetch_min_prices_by_date",
-        ) as fetch:
-            offers, stats = flight_search.collect_offers(
-                destinations=({"code": "FUK", "city": "후쿠오카", "country": "일본"},),
-                trips=[(date(2026, 10, 10), date(2026, 10, 12))],
-            )
-
-        self.assertEqual(offers, [])
-        self.assertTrue(stats["aborted"])
-        fetch.assert_not_called()
 
 
 class RunDigestTests(unittest.TestCase):

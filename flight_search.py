@@ -31,7 +31,7 @@ import requests
 # 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
 # probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
 # 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
-BUILD_MARKER = 'param-isolate-2026-10-12'
+BUILD_MARKER = 'recipe-confirmed-2026-10-12'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -270,33 +270,29 @@ PERSISTED_QUERY_EXTENSIONS = {
     },
 }
 
-# locationType/tripType는 문자열 인자라 GraphQL이 유효값을 검증해주지 않는다
-# (틀려도 에러가 아니라 그냥 빈 결과로 조용히 돌아온다). 그래서 실제로 결과가
-# 돌아오는 조합을 찾을 때까지 후보를 순서대로 시도한다.
-LOCATION_TYPE_CANDIDATES = ('AIRPORT', 'CITY', None)
-TRIP_TYPE_CANDIDATES = ('RT', 'ROUND_TRIP', 'ROUND', None)
-
 # 페이지가 어떤 이름으로 상태를 심어두는지 알아내기 위한 진단용 패턴
 # (실제로는 __OTEL_* 뿐이었다 — 운임은 페이지에 안 실려 있고 XHR로 온다)
 STATE_VAR_RE = re.compile(r'(?:window\.)?(__[A-Z0-9_]+__)\s*=')
 
 
-def _min_prices_by_date_variables(
-    origin, destination, trip_days, location_type=None, trip_type=None,
-):
-    variables = {
+def _min_prices_by_date_variables(origin, destination, departure):
+    """2026-10-12 실험으로 확정한, 실제로 통하는 변수 조합.
+
+    핵심은 `groupByDepartureDate: False`다. True면 그 출발일의 '아무 복귀일이나
+    포함한 최저가' 한 줄만 오지만(복귀일이 25일 뒤로 오기도 한다), False면
+    복귀일별로 한 줄씩 와서 우리가 원하는 2박 3일 조합을 고를 수 있다.
+
+    넣으면 안 되는 것:
+    - `isNonstop` — 넣는 순간 결과가 통째로 빈다(값과 무관).
+    - `tripDays` — 무시된다. 일정 길이는 복귀일을 직접 골라서 맞춘다.
+    """
+    return {
         'departureLocationCode': origin,
         'arrivalLocationCode': destination,
-        'groupByDepartureDate': True,
-        'isNonstop': False,
-        'tripDays': [trip_days],
+        'departureDate': f'{departure:%Y%m%d}',
+        'tripType': 'RT',
+        'groupByDepartureDate': False,
     }
-    if location_type:
-        variables['departureLocationType'] = location_type
-        variables['arrivalLocationType'] = location_type
-    if trip_type:
-        variables['tripType'] = trip_type
-    return variables
 
 
 def _rows_from_min_prices_body(body):
@@ -325,24 +321,28 @@ def warm_session(timeout=FETCH_TIMEOUT):
 
 
 def fetch_min_prices_by_date(
-    origin, destination, trip_days, location_type=None, trip_type=None,
-    timeout=FETCH_TIMEOUT, session=None, endpoint=None,
+    origin, destination, departure, timeout=FETCH_TIMEOUT, session=None, endpoint=None,
 ):
-    """도시 하나의 날짜별 최저가 목록을 한 번에 받아온다.
+    """출발일 하나에 대해 복귀일별 최저가 목록을 받아온다.
 
-    locationType/tripType은 문자열 인자라 틀려도 에러 없이 빈 결과만
-    돌아오므로, 호출부(calibrate_min_prices_by_date/collect_offers)가 실제로
-    행이 돌아오는 조합을 찾아 넘겨줘야 한다. session을 주지 않으면 쿠키 없는
-    1회성 요청이 되므로, 보통은 warm_session()으로 만든 세션을 넘긴다.
-
-    endpoint를 바꿔 부를 수 있는 이유: 네이버는 기능별로 GraphQL 서버가
-    나뉘어 있을 수 있고, 엔드포인트가 틀리면 필드가 존재하는데도
-    "필드를 모른다"는 검증 오류가 난다 (discover_endpoints 참고).
+    반환되는 행은 복귀일마다 한 줄씩이라, 원하는 일정 길이는 호출부가
+    복귀일을 골라서 맞춘다(pick_return_row 참고).
     """
-    variables = _min_prices_by_date_variables(
-        origin, destination, trip_days, location_type, trip_type,
-    )
+    variables = _min_prices_by_date_variables(origin, destination, departure)
     return post_min_prices(variables, timeout, session, endpoint)
+
+
+def pick_return_row(rows, departure, nights=TRIP_NIGHTS):
+    """복귀일별 행 중 '출발일 + nights'에 해당하는 행만 고른다.
+
+    토요일 출발 → 월요일 복귀(2박 3일)만 보기 위한 것. 응답에는 같은 날
+    복귀부터 한 달 뒤 복귀까지 섞여 오므로 반드시 걸러야 한다.
+    """
+    target = departure + timedelta(days=nights)
+    for row in rows or []:
+        if _parse_api_date(row.get('returnDate')) == target:
+            return row
+    return None
 
 
 def post_min_prices(variables, timeout=FETCH_TIMEOUT, session=None, endpoint=None):
@@ -384,44 +384,6 @@ def post_min_prices(variables, timeout=FETCH_TIMEOUT, session=None, endpoint=Non
         diagnostic['snippet'] = json.dumps(body, ensure_ascii=False)[:300]
         return None, diagnostic
     return rows, diagnostic
-
-
-def calibrate_min_prices_by_date(
-    origin=ORIGIN, destination='NRT', trip_days=TRIP_NIGHTS, timeout=FETCH_TIMEOUT,
-    session=None, endpoint=None,
-):
-    """locationType/tripType 후보 중 실제로 행을 돌려주는 조합을 찾는다.
-
-    한 번 찾으면 이후 도시마다 다시 찾을 필요 없이 재사용한다(collect_offers
-    가 이 함수를 한 번만 호출해 캐시한다). session을 안 주면 warm_session()
-    으로 하나 만들어 쓴다.
-    """
-    session = session or warm_session(timeout)
-    attempts = []
-    for location_type in LOCATION_TYPE_CANDIDATES:
-        for trip_type in TRIP_TYPE_CANDIDATES:
-            try:
-                rows, diagnostic = fetch_min_prices_by_date(
-                    origin, destination, trip_days, location_type, trip_type,
-                    timeout, session=session, endpoint=endpoint,
-                )
-            except requests.RequestException as exc:
-                diagnostic = {'error': f'요청 실패: {exc}'}
-                rows = None
-            attempts.append({
-                'location_type': location_type,
-                'trip_type': trip_type,
-                **diagnostic,
-                'rows': len(rows) if rows else 0,
-            })
-            if rows:
-                return {
-                    'endpoint': endpoint or NAVER_GRAPHQL_URL,
-                    'location_type': location_type,
-                    'trip_type': trip_type,
-                    'sample': rows[:5],
-                }, attempts
-    return None, attempts
 
 
 ROOT_FIELDS_QUERY = """
@@ -790,38 +752,6 @@ def try_endpoints(
     return results
 
 
-def _parameter_experiments(origin=ORIGIN, destination='FUK'):
-    """최소 조합을 기준으로 파라미터를 하나씩만 더해 영향을 분리한다.
-
-    1차 실험에서 departureLocationType='AIRPORT'를 넣은 조합(A~D)은 전부
-    0건이었고, 타입·isNonstop을 모두 뺀 최소 조합(F)만 요청한 출발일을
-    그대로 돌려줬다. 그래서 '되는' 최소 조합을 기준점으로 삼고 한 번에
-    하나씩만 바꿔 어느 것이 결과를 죽이고 어느 것이 일정 길이를
-    제어하는지 가른다.
-    """
-    departure, _ = iter_weekend_trips()[0]
-    day = f'{departure:%Y%m%d}'
-    base = {
-        'departureLocationCode': origin,
-        'arrivalLocationCode': destination,
-        'departureDate': day,
-        'tripType': 'RT',
-    }
-    return [
-        ('base_최소', dict(base)),
-        ('p_tripDays2', {**base, 'tripDays': [2]}),
-        ('p_tripDays3', {**base, 'tripDays': [3]}),
-        ('p_tripDays범위', {**base, 'tripDays': [1, 2, 3, 4, 5]}),
-        ('p_group참', {**base, 'groupByDepartureDate': True}),
-        ('p_group거짓', {**base, 'groupByDepartureDate': False}),
-        ('p_직항only거짓', {**base, 'isNonstop': False}),
-        ('p_locType', {**base, 'departureLocationType': 'AIRPORT',
-                       'arrivalLocationType': 'AIRPORT'}),
-        ('p_tripDays2_group참', {**base, 'tripDays': [2], 'groupByDepartureDate': True}),
-        ('p_날짜없음', {'departureLocationCode': origin,
-                        'arrivalLocationCode': destination, 'tripType': 'RT'}),
-    ]
-
 
 def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
     """기동 시 한 번 진단을 돌려 결과를 전부 stdout으로 남긴다.
@@ -834,51 +764,39 @@ def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
     print(f'[flight-diag] build={BUILD_MARKER}')
     try:
         session = warm_session(timeout)
-        print(f'[flight-diag] cookies={len(session.cookies)}')
+        trips = iter_weekend_trips()
+        departure, return_date = trips[0]
 
-        discovered = discover_endpoints(timeout=timeout)
-        print(f'[flight-diag] naver_hosts={discovered["naver_hosts"]}')
-        print(f'[flight-diag] apollo_uris={discovered["apollo_uris"]}')
-
-        # 주소는 확정됐으니(NAVER_GRAPHQL_URL) 조합과 응답 형태를 확인한다.
-        calibration, attempts = calibrate_min_prices_by_date(
-            timeout=timeout, session=session,
-        )
-        for attempt in attempts:
-            print(
-                f'[flight-diag] loc={attempt.get("location_type")} '
-                f'trip={attempt.get("trip_type")} status={attempt.get("status")} '
-                f'rows={attempt.get("rows")} error={attempt.get("error")} '
-                f'body={str(attempt.get("snippet"))[:300]}'
+        # 확정된 레시피가 실제로 2박 3일 가격을 주는지 도시 몇 곳으로 확인
+        for code in ('FUK', 'NRT', 'BKK'):
+            rows, diagnostic = fetch_min_prices_by_date(
+                ORIGIN, code, departure, timeout, session=session,
             )
-        if not calibration:
-            print('[flight-diag] 통하는 조합 없음')
-            return
+            row = pick_return_row(rows, departure)
+            print(
+                f'[flight-diag] {code} {departure:%m/%d}~{return_date:%m/%d} '
+                f'status={diagnostic.get("status")} 복귀일수={len(rows or [])} '
+                f'2박3일={json.dumps(row, ensure_ascii=False)} '
+                f'err={diagnostic.get("error")}'
+            )
 
+        # 전체 수집을 작은 표본으로 돌려 추천까지 나오는지 확인
+        sample_destinations = DESTINATIONS[:4]
+        offers, stats = collect_offers(
+            destinations=sample_destinations, trips=trips[:3],
+        )
+        print(f'[flight-diag] 표본수집 stats={stats}')
         print(
-            f'[flight-diag] OK loc={calibration["location_type"]} '
-            f'trip={calibration["trip_type"]}'
-        )
-        print(f'[flight-diag] sample={json.dumps(calibration["sample"], ensure_ascii=False)}')
-
-        # tripDays가 무시되고 날짜도 제각각으로 오는 것을 확인했으므로,
-        # 어떤 파라미터 조합이 '날짜별 달력'을 주는지 한 번에 실험한다.
-        for label, variables in _parameter_experiments():
-            try:
-                rows, diagnostic = post_min_prices(variables, timeout, session)
-            except requests.RequestException as exc:
-                print(f'[flight-diag] {label} 요청 실패: {exc}')
-                continue
-            print(
-                f'[flight-diag] {label} status={diagnostic.get("status")} '
-                f'rows={len(rows or [])} err={diagnostic.get("error")} '
-                f'body={str(diagnostic.get("snippet"))[:200]}'
+            '[flight-diag] 표본오퍼='
+            + json.dumps(
+                [
+                    {'city': o['city'], 'price': o['price'],
+                     'depart': f"{o['depart']:%Y-%m-%d}"}
+                    for o in sorted(offers, key=lambda o: o['price'])[:10]
+                ],
+                ensure_ascii=False,
             )
-            if rows:
-                print(
-                    f'[flight-diag] {label} raw='
-                    f'{json.dumps(rows[:8], ensure_ascii=False)}'
-                )
+        )
     except Exception as exc:  # 진단이 앱 기동을 막으면 안 된다
         print(f'[flight-diag] 진단 실패: {exc!r}')
 
@@ -970,43 +888,25 @@ def _parse_api_price(value):
     return None
 
 
-def rows_to_offers(rows, dest, origin, trips, nights=TRIP_NIGHTS):
-    """minPricesByDate 응답 행 중, 우리가 찾는 토요일 출발 건만 오퍼로 바꾼다.
-
-    API가 기간 전체(우리가 원하는 3개월보다 넓거나 좁을 수 있음)를 돌려줄 수
-    있으므로, 실제 조회 대상으로 잡은 trips(토요일 목록)에 있는 날짜만
-    남긴다. 같은 날짜가 여러 행으로 와도 최저가만 남긴다.
-    """
-    wanted_departures = {departure for departure, _ in trips}
-    best_by_date = {}
-    for row in rows or []:
-        departure = _parse_api_date(row.get('departureDate'))
-        return_date = _parse_api_date(row.get('returnDate'))
-        price = _parse_api_price(row.get('minPrice'))
-        if departure is None or price is None:
-            continue
-        if departure not in wanted_departures:
-            continue
-        if return_date is not None and (return_date - departure).days != nights:
-            continue
-        if return_date is None:
-            return_date = departure + timedelta(days=nights)
-        if departure in best_by_date and best_by_date[departure]['price'] <= price:
-            continue
-        best_by_date[departure] = {
-            'price': price,
-            'city': dest['city'],
-            'country': dest['country'],
-            'code': dest['code'],
-            'depart': departure,
-            'return': return_date,
-            'depart_hour': None,
-            'return_hour': None,
-            'time_ok': None,
-            'source': 'graphql',
-            'url': naver_flight_url(origin, dest['code'], departure, return_date),
-        }
-    return list(best_by_date.values())
+def build_offer(row, dest, origin, departure, return_date):
+    """고른 행 하나를 추천 후보로 바꾼다. 가격이 없으면 None."""
+    price = _parse_api_price(row.get('minPrice'))
+    if price is None:
+        return None
+    return {
+        'price': price,
+        'city': dest['city'],
+        'country': dest['country'],
+        'code': dest['code'],
+        'depart': departure,
+        'return': return_date,
+        # 이 응답에는 편별 시각이 없다 — '오전 출발/오후 복귀'는 아직 미확인.
+        'depart_hour': None,
+        'return_hour': None,
+        'time_ok': None,
+        'source': 'graphql',
+        'url': naver_flight_url(origin, dest['code'], departure, return_date),
+    }
 
 
 def collect_offers(
@@ -1016,12 +916,12 @@ def collect_offers(
     concurrency=FETCH_CONCURRENCY,
     max_price=MAX_PRICE,
     fail_fast_after=FAIL_FAST_AFTER,
-    calibration=None,
 ):
-    """도시별로 날짜별 최저가를 훑어 가격 상한 이하 후보를 모은다.
+    """(도시 × 토요일)마다 2박 3일 왕복 최저가를 모은다.
 
-    minPricesByDate가 도시 하나당 한 번의 호출로 여러 날짜의 가격을 주기
-    때문에, (도시 × 날짜) 조합이 아니라 도시 단위로만 요청한다.
+    한 번의 호출은 '그 출발일의 복귀일별 가격'을 주므로, 출발일 단위로
+    요청하고 복귀일이 +2일인 행만 고른다. 도시 하나로 3개월치를 한 번에
+    받을 수는 없었다 — groupByDepartureDate를 켜면 일정 길이를 못 고른다.
 
     반환: (후보 목록, 통계). 통계의 `failed`/`succeeded`로 '진짜 싼 게 없는
     것'과 '수집 자체가 실패한 것'을 구분한다 — 이 둘을 뭉뚱그리면 네이버가
@@ -1030,31 +930,28 @@ def collect_offers(
     한 건도 못 가져온 채 실패만 fail_fast_after건 쌓이면 남은 작업을 버린다.
     """
     trips = trips if trips is not None else iter_weekend_trips()
+    jobs = [
+        (dest, departure, return_date)
+        for dest in destinations
+        for departure, return_date in trips
+    ]
     stats = {
         'attempted': 0, 'succeeded': 0, 'failed': 0,
-        'total': len(destinations), 'aborted': False,
+        'total': len(jobs), 'aborted': False,
     }
 
-    # 세션을 한 번만 만들어 캘리브레이션과 도시별 요청 전체에서 재사용한다.
     session = warm_session()
-    if calibration is None:
-        calibration, _ = calibrate_min_prices_by_date(origin=origin, session=session)
-    if calibration is None:
-        stats['aborted'] = True
-        return [], stats
-
     offers = []
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {
             executor.submit(
-                fetch_min_prices_by_date, origin, dest['code'], TRIP_NIGHTS,
-                calibration['location_type'], calibration['trip_type'],
-                session=session, endpoint=calibration.get('endpoint'),
-            ): dest
-            for dest in destinations
+                fetch_min_prices_by_date, origin, dest['code'], departure,
+                session=session,
+            ): (dest, departure, return_date)
+            for dest, departure, return_date in jobs
         }
         for future in as_completed(futures):
-            dest = futures[future]
+            dest, departure, return_date = futures[future]
             stats['attempted'] += 1
             try:
                 rows, _ = future.result()
@@ -1070,9 +967,12 @@ def collect_offers(
                 continue
 
             stats['succeeded'] += 1
-            for offer in rows_to_offers(rows, dest, origin, trips):
-                if offer['price'] <= max_price:
-                    offers.append(offer)
+            row = pick_return_row(rows, departure)
+            if row is None:
+                continue
+            offer = build_offer(row, dest, origin, departure, return_date)
+            if offer and offer['price'] <= max_price:
+                offers.append(offer)
     return offers, stats
 
 
