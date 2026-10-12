@@ -31,7 +31,7 @@ import requests
 # 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
 # probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
 # 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
-BUILD_MARKER = 'host-sweep-2026-09-18'
+BUILD_MARKER = 'opname-headers-2026-10-12'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -192,6 +192,15 @@ NAVER_PAGE_HEADERS = {
     'Accept-Language': 'ko-KR,ko;q=0.9',
 }
 
+# GraphQL 호출에는 Apollo Client가 붙이는 헤더까지 얹는다. 게이트웨이가
+# 알려진 클라이언트만 받는 경우 이게 없으면 거부당할 수 있다.
+NAVER_GRAPHQL_HEADERS = {
+    **NAVER_PAGE_HEADERS,
+    'Content-Type': 'application/json',
+    'apollographql-client-name': 'flight-web',
+    'x-apollo-operation-name': 'minPricesByDate',
+}
+
 # JS 번들 스캔(discover_queries)으로 확보한 실제 쿼리. 네이버 항공권 날짜별
 # 캘린더 위젯이 쓰는 쿼리로, 도시 하나당 한 번만 불러도 여러 날짜의 최저가를
 # 한꺼번에 돌려준다 (도시 수만큼만 부르면 되고, 도시×날짜만큼 부를 필요가
@@ -332,12 +341,17 @@ def fetch_min_prices_by_date(
     http = session or requests
     response = http.post(
         endpoint or NAVER_GRAPHQL_URL,
+        # operationName은 Apollo Client가 항상 같이 보내는 값이다. 우리는
+        # 지금까지 빼고 보냈는데, 운영 게이트웨이가 '허용된 오퍼레이션
+        # 이름'만 받도록 막아둔 경우 이름 없는 요청은 필드가 멀쩡해도
+        # 모호한 검증 오류로 거부된다.
         json={
+            'operationName': 'minPricesByDate',
             'query': NAVER_MIN_PRICES_BY_DATE_QUERY,
             'variables': variables,
             'extensions': PERSISTED_QUERY_EXTENSIONS,
         },
-        headers=NAVER_PAGE_HEADERS,
+        headers=NAVER_GRAPHQL_HEADERS,
         timeout=timeout,
     )
     diagnostic = {'status': response.status_code, 'bytes': len(response.content)}
@@ -761,6 +775,38 @@ def try_endpoints(
             entry['rows'] = 0
         results.append(entry)
     return results
+
+
+def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
+    """기동 시 한 번 진단을 돌려 결과를 전부 stdout으로 남긴다.
+
+    개발 환경에서는 네이버로 나갈 수 없어, 실물 응답을 볼 수 있는 길이
+    사람이 진단 URL을 눌러 결과를 복사해 주는 것뿐이었다. Render 로그는
+    기계가 직접 읽을 수 있으므로, 여기에 찍어두면 사람 손을 거치지 않고
+    원인을 좁힐 수 있다. 원인을 찾으면 이 함수 호출은 지워야 한다.
+    """
+    print(f'[flight-diag] build={BUILD_MARKER}')
+    try:
+        session = warm_session(timeout)
+        print(f'[flight-diag] cookies={len(session.cookies)}')
+
+        discovered = discover_endpoints(timeout=timeout)
+        print(f'[flight-diag] naver_hosts={discovered["naver_hosts"]}')
+        print(f'[flight-diag] apollo_uris={discovered["apollo_uris"]}')
+
+        candidates = list(discovered['candidates'])
+        if NAVER_GRAPHQL_URL not in candidates:
+            candidates.append(NAVER_GRAPHQL_URL)
+        print(f'[flight-diag] candidates={candidates}')
+
+        for entry in try_endpoints(candidates, timeout=timeout, session=session):
+            print(
+                f'[flight-diag] endpoint={entry.get("endpoint")} '
+                f'status={entry.get("status")} rows={entry.get("rows")} '
+                f'error={entry.get("error")} body={str(entry.get("snippet"))[:400]}'
+            )
+    except Exception as exc:  # 진단이 앱 기동을 막으면 안 된다
+        print(f'[flight-diag] 진단 실패: {exc!r}')
 
 
 def inspect_page(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
