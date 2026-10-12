@@ -31,7 +31,7 @@ import requests
 # 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
 # probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
 # 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
-BUILD_MARKER = 'opname-headers-2026-10-12'
+BUILD_MARKER = 'flight-api-found-2026-10-12'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -180,7 +180,11 @@ def extract_min_fare(payload):
 
 # --- 네트워크 계층 ---------------------------------------------------------
 
-NAVER_GRAPHQL_URL = 'https://airline-api.naver.com/graphql'
+# 2026-10-12 기동 진단으로 확정한 실제 주소. 후보를 전부 던져본 결과
+# 여기만 200 + 실제 행을 돌려줬다 (나머지는 404/503/HTML).
+# 이전에 쓰던 airline-api.naver.com은 내가 추측으로 넣은 주소였고, 진짜
+# GraphQL 서버이긴 하지만 minPricesByDate를 모르는 다른 서비스였다.
+NAVER_GRAPHQL_URL = 'https://flight-api.naver.com/graphql'
 NAVER_PAGE_HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -794,17 +798,37 @@ def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
         print(f'[flight-diag] naver_hosts={discovered["naver_hosts"]}')
         print(f'[flight-diag] apollo_uris={discovered["apollo_uris"]}')
 
-        candidates = list(discovered['candidates'])
-        if NAVER_GRAPHQL_URL not in candidates:
-            candidates.append(NAVER_GRAPHQL_URL)
-        print(f'[flight-diag] candidates={candidates}')
-
-        for entry in try_endpoints(candidates, timeout=timeout, session=session):
+        # 주소는 확정됐으니(NAVER_GRAPHQL_URL) 조합과 응답 형태를 확인한다.
+        calibration, attempts = calibrate_min_prices_by_date(
+            timeout=timeout, session=session,
+        )
+        for attempt in attempts:
             print(
-                f'[flight-diag] endpoint={entry.get("endpoint")} '
-                f'status={entry.get("status")} rows={entry.get("rows")} '
-                f'error={entry.get("error")} body={str(entry.get("snippet"))[:400]}'
+                f'[flight-diag] loc={attempt.get("location_type")} '
+                f'trip={attempt.get("trip_type")} status={attempt.get("status")} '
+                f'rows={attempt.get("rows")} error={attempt.get("error")} '
+                f'body={str(attempt.get("snippet"))[:300]}'
             )
+        if not calibration:
+            print('[flight-diag] 통하는 조합 없음')
+            return
+
+        print(
+            f'[flight-diag] OK loc={calibration["location_type"]} '
+            f'trip={calibration["trip_type"]}'
+        )
+        print(f'[flight-diag] sample={json.dumps(calibration["sample"], ensure_ascii=False)}')
+
+        # 우리가 원하는 토요일 일정으로 실제로 몇 건이 걸리는지까지 확인한다
+        trips = iter_weekend_trips()
+        rows, _ = fetch_min_prices_by_date(
+            ORIGIN, 'FUK', TRIP_NIGHTS, calibration['location_type'],
+            calibration['trip_type'], timeout, session=session,
+        )
+        print(f'[flight-diag] FUK rows={len(rows or [])} 토요일수={len(trips)}')
+        print(f'[flight-diag] FUK raw={json.dumps((rows or [])[:12], ensure_ascii=False)}')
+        offers = rows_to_offers(rows, {'code': 'FUK', 'city': '후쿠오카', 'country': '일본'}, ORIGIN, trips)
+        print(f'[flight-diag] FUK 매칭된 토요일={len(offers)}')
     except Exception as exc:  # 진단이 앱 기동을 막으면 안 된다
         print(f'[flight-diag] 진단 실패: {exc!r}')
 
