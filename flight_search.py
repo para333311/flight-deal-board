@@ -31,7 +31,7 @@ import requests
 # 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
 # probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
 # 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
-BUILD_MARKER = 'param-experiments-2026-10-12'
+BUILD_MARKER = 'param-isolate-2026-10-12'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -791,30 +791,35 @@ def try_endpoints(
 
 
 def _parameter_experiments(origin=ORIGIN, destination='FUK'):
-    """어떤 파라미터 조합이 '날짜별 최저가 달력'을 주는지 보기 위한 실험군.
+    """최소 조합을 기준으로 파라미터를 하나씩만 더해 영향을 분리한다.
 
-    기본 조합(departureDate 없이 tripDays만)은 tripDays를 무시하고 2027년까지
-    흩어진 소수의 행만 돌려줬다. departureDate를 주는지, groupByDepartureDate를
-    어떻게 두는지, tripDays를 박수로 세는지 일수로 세는지를 가른다.
+    1차 실험에서 departureLocationType='AIRPORT'를 넣은 조합(A~D)은 전부
+    0건이었고, 타입·isNonstop을 모두 뺀 최소 조합(F)만 요청한 출발일을
+    그대로 돌려줬다. 그래서 '되는' 최소 조합을 기준점으로 삼고 한 번에
+    하나씩만 바꿔 어느 것이 결과를 죽이고 어느 것이 일정 길이를
+    제어하는지 가른다.
     """
     departure, _ = iter_weekend_trips()[0]
     day = f'{departure:%Y%m%d}'
     base = {
         'departureLocationCode': origin,
         'arrivalLocationCode': destination,
-        'departureLocationType': 'AIRPORT',
-        'arrivalLocationType': 'AIRPORT',
-        'isNonstop': False,
+        'departureDate': day,
         'tripType': 'RT',
     }
     return [
-        ('A_날짜지정', {**base, 'departureDate': day, 'tripDays': [2], 'groupByDepartureDate': True}),
-        ('B_그룹off', {**base, 'departureDate': day, 'tripDays': [2], 'groupByDepartureDate': False}),
-        ('C_일수3', {**base, 'departureDate': day, 'tripDays': [3], 'groupByDepartureDate': True}),
-        ('D_tripDays없음', {**base, 'departureDate': day, 'groupByDepartureDate': True}),
-        ('E_그룹만', {**base, 'tripDays': [2], 'groupByDepartureDate': False}),
-        ('F_최소', {'departureLocationCode': origin, 'arrivalLocationCode': destination,
-                    'departureDate': day, 'tripType': 'RT'}),
+        ('base_최소', dict(base)),
+        ('p_tripDays2', {**base, 'tripDays': [2]}),
+        ('p_tripDays3', {**base, 'tripDays': [3]}),
+        ('p_tripDays범위', {**base, 'tripDays': [1, 2, 3, 4, 5]}),
+        ('p_group참', {**base, 'groupByDepartureDate': True}),
+        ('p_group거짓', {**base, 'groupByDepartureDate': False}),
+        ('p_직항only거짓', {**base, 'isNonstop': False}),
+        ('p_locType', {**base, 'departureLocationType': 'AIRPORT',
+                       'arrivalLocationType': 'AIRPORT'}),
+        ('p_tripDays2_group참', {**base, 'tripDays': [2], 'groupByDepartureDate': True}),
+        ('p_날짜없음', {'departureLocationCode': origin,
+                        'arrivalLocationCode': destination, 'tripType': 'RT'}),
     ]
 
 
