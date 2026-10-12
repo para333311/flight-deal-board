@@ -2,6 +2,7 @@ import html
 import json
 import os
 import re
+import threading
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 import requests
@@ -718,6 +719,7 @@ def run_flight_digest():
 # gunicorn 배포에서는 __main__ 블록이 실행되지 않으므로 모듈 로드 시점에 방문자 테이블을 준비한다.
 init_db()
 
+
 # gunicorn 배포에서도 알림이 돌도록 모듈 로드 시점에 잡을 등록한다.
 # (텔레그램 미설정 상태나 테스트 실행 중에는 등록하지 않음)
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and FLIGHT_DIGEST_ENABLED:
@@ -911,6 +913,15 @@ def visitors():
         return jsonify(visitors_data)
 
 if __name__ == '__main__':
+    # 네이버 수집이 왜 실패하는지 아직 못 밝혔다. 기동 시 한 번 진단을 돌려
+    # Render 로그에 남긴다 — 사람이 진단 URL을 눌러 결과를 복사해 주지
+    # 않아도 로그만 보면 원인을 좁힐 수 있다. 백그라운드 스레드라 앱 기동을
+    # 막지 않는다. 원인을 찾으면 이 블록은 지운다. (한시적 코드)
+    if os.environ.get('FLIGHT_PROBE_ON_START', 'true').lower() == 'true':
+        threading.Thread(
+            target=flight_search.log_startup_diagnosis, daemon=True,
+        ).start()
+
     # DB 초기화
     print("DB 초기화 중...")
     init_db()
