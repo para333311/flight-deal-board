@@ -31,7 +31,7 @@ import requests
 # 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
 # probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
 # 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
-BUILD_MARKER = 'flight-api-found-2026-10-12'
+BUILD_MARKER = 'param-experiments-2026-10-12'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -342,6 +342,15 @@ def fetch_min_prices_by_date(
     variables = _min_prices_by_date_variables(
         origin, destination, trip_days, location_type, trip_type,
     )
+    return post_min_prices(variables, timeout, session, endpoint)
+
+
+def post_min_prices(variables, timeout=FETCH_TIMEOUT, session=None, endpoint=None):
+    """임의의 변수로 minPricesByDate를 호출한다. 반환: (행 목록|None, 진단).
+
+    변수 조합을 바꿔가며 실험할 수 있도록 fetch_min_prices_by_date에서
+    분리해뒀다 (응답이 어떤 모드로 오는지 파라미터에 따라 달라진다).
+    """
     http = session or requests
     response = http.post(
         endpoint or NAVER_GRAPHQL_URL,
@@ -781,6 +790,34 @@ def try_endpoints(
     return results
 
 
+def _parameter_experiments(origin=ORIGIN, destination='FUK'):
+    """어떤 파라미터 조합이 '날짜별 최저가 달력'을 주는지 보기 위한 실험군.
+
+    기본 조합(departureDate 없이 tripDays만)은 tripDays를 무시하고 2027년까지
+    흩어진 소수의 행만 돌려줬다. departureDate를 주는지, groupByDepartureDate를
+    어떻게 두는지, tripDays를 박수로 세는지 일수로 세는지를 가른다.
+    """
+    departure, _ = iter_weekend_trips()[0]
+    day = f'{departure:%Y%m%d}'
+    base = {
+        'departureLocationCode': origin,
+        'arrivalLocationCode': destination,
+        'departureLocationType': 'AIRPORT',
+        'arrivalLocationType': 'AIRPORT',
+        'isNonstop': False,
+        'tripType': 'RT',
+    }
+    return [
+        ('A_날짜지정', {**base, 'departureDate': day, 'tripDays': [2], 'groupByDepartureDate': True}),
+        ('B_그룹off', {**base, 'departureDate': day, 'tripDays': [2], 'groupByDepartureDate': False}),
+        ('C_일수3', {**base, 'departureDate': day, 'tripDays': [3], 'groupByDepartureDate': True}),
+        ('D_tripDays없음', {**base, 'departureDate': day, 'groupByDepartureDate': True}),
+        ('E_그룹만', {**base, 'tripDays': [2], 'groupByDepartureDate': False}),
+        ('F_최소', {'departureLocationCode': origin, 'arrivalLocationCode': destination,
+                    'departureDate': day, 'tripType': 'RT'}),
+    ]
+
+
 def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
     """기동 시 한 번 진단을 돌려 결과를 전부 stdout으로 남긴다.
 
@@ -819,16 +856,24 @@ def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
         )
         print(f'[flight-diag] sample={json.dumps(calibration["sample"], ensure_ascii=False)}')
 
-        # 우리가 원하는 토요일 일정으로 실제로 몇 건이 걸리는지까지 확인한다
-        trips = iter_weekend_trips()
-        rows, _ = fetch_min_prices_by_date(
-            ORIGIN, 'FUK', TRIP_NIGHTS, calibration['location_type'],
-            calibration['trip_type'], timeout, session=session,
-        )
-        print(f'[flight-diag] FUK rows={len(rows or [])} 토요일수={len(trips)}')
-        print(f'[flight-diag] FUK raw={json.dumps((rows or [])[:12], ensure_ascii=False)}')
-        offers = rows_to_offers(rows, {'code': 'FUK', 'city': '후쿠오카', 'country': '일본'}, ORIGIN, trips)
-        print(f'[flight-diag] FUK 매칭된 토요일={len(offers)}')
+        # tripDays가 무시되고 날짜도 제각각으로 오는 것을 확인했으므로,
+        # 어떤 파라미터 조합이 '날짜별 달력'을 주는지 한 번에 실험한다.
+        for label, variables in _parameter_experiments():
+            try:
+                rows, diagnostic = post_min_prices(variables, timeout, session)
+            except requests.RequestException as exc:
+                print(f'[flight-diag] {label} 요청 실패: {exc}')
+                continue
+            print(
+                f'[flight-diag] {label} status={diagnostic.get("status")} '
+                f'rows={len(rows or [])} err={diagnostic.get("error")} '
+                f'body={str(diagnostic.get("snippet"))[:200]}'
+            )
+            if rows:
+                print(
+                    f'[flight-diag] {label} raw='
+                    f'{json.dumps(rows[:8], ensure_ascii=False)}'
+                )
     except Exception as exc:  # 진단이 앱 기동을 막으면 안 된다
         print(f'[flight-diag] 진단 실패: {exc!r}')
 
