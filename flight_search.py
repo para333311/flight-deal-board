@@ -5,10 +5,10 @@
 나라별 쿼터를 적용해 추천 목록을 만든 뒤 텔레그램으로 보낸다.
 
 네트워크 계층은 네이버 GraphQL의 `minPricesByDate`를 직접 부르는 부분이라
-개발 환경에서는 검증할 수 없었다(외부 접근이 막혀 있음). JS 번들 스캔으로
-실제 쿼리문은 확보했지만 locationType/tripType 문자열 인자의 유효 값은
-introspection 없이 알 수 없어, `calibrate_min_prices_by_date()`가 후보
-조합을 실제로 돌려보고 찾는다. 어떤 조합이 통했는지는 `probe()`로 확인한다.
+개발 환경에서는 검증할 수 없다(외부 접근이 막혀 있음). 실제로 통하는
+엔드포인트와 변수 조합은 2026-10-12에 배포 로그 기반 실험으로 확정했다
+(`NAVER_GRAPHQL_URL`, `_min_prices_by_date_variables` 주석 참고). 지금도
+통하는지는 `probe()`로 확인한다.
 
 이 쿼리는 가격·날짜만 주고 시각(오전/오후)은 안 준다. 그래서 depart_hour/
 return_hour는 항상 None이고, '오전 출발/오후 복귀' 조건은 아직 검증할 수
@@ -31,7 +31,7 @@ import requests
 # 배포가 실제로 반영됐는지 추측하지 않고 확인하기 위한 표식.
 # probe() 응답에 실려 나간다 — 값이 배포 전 커밋 때와 같으면 Render가 아직
 # 새 코드를 안 받은 것이다. 의미 있게 코드를 바꿀 때마다 새로 바꿔둔다.
-BUILD_MARKER = 'recipe-confirmed-2026-10-12'
+BUILD_MARKER = 'cleanup-2026-10-12'
 
 ORIGIN = os.environ.get('FLIGHT_ORIGIN', 'ICN')
 MAX_PRICE = int(os.environ.get('FLIGHT_MAX_PRICE', '400000'))
@@ -206,11 +206,8 @@ NAVER_GRAPHQL_HEADERS = {
 }
 
 # JS 번들 스캔(discover_queries)으로 확보한 실제 쿼리. 네이버 항공권 날짜별
-# 캘린더 위젯이 쓰는 쿼리로, 도시 하나당 한 번만 불러도 여러 날짜의 최저가를
-# 한꺼번에 돌려준다 (도시 수만큼만 부르면 되고, 도시×날짜만큼 부를 필요가
-# 없다). 단 departureLocationType/arrivalLocationType(문자열)과 tripType의
-# 실제 유효 값은 introspection이 막혀 있어 알 수 없어서 여러 후보를
-# calibrate_min_prices_by_date()가 실제로 돌려보고 찾는다.
+# 캘린더 위젯이 쓰는 쿼리로, 출발일 하나를 주면 복귀일별 최저가를 한꺼번에
+# 돌려준다. 실제로 통하는 변수 조합은 _min_prices_by_date_variables 참고.
 #
 # timeCategories($timeCategories: [DepartureTimeCategory!]) 인자는 뺐다.
 # 값을 안 보내도(선언만 있어도) 12개 조합 전부 line 10 col 21 —
@@ -269,10 +266,6 @@ PERSISTED_QUERY_EXTENSIONS = {
         ).hexdigest(),
     },
 }
-
-# 페이지가 어떤 이름으로 상태를 심어두는지 알아내기 위한 진단용 패턴
-# (실제로는 __OTEL_* 뿐이었다 — 운임은 페이지에 안 실려 있고 XHR로 온다)
-STATE_VAR_RE = re.compile(r'(?:window\.)?(__[A-Z0-9_]+__)\s*=')
 
 
 def _min_prices_by_date_variables(origin, destination, departure):
@@ -384,123 +377,6 @@ def post_min_prices(variables, timeout=FETCH_TIMEOUT, session=None, endpoint=Non
         diagnostic['snippet'] = json.dumps(body, ensure_ascii=False)[:300]
         return None, diagnostic
     return rows, diagnostic
-
-
-ROOT_FIELDS_QUERY = """
-query {
-  __schema {
-    queryType {
-      name
-      fields {
-        name
-        args {
-          name
-          type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
-        }
-      }
-    }
-  }
-}
-"""
-
-INPUT_TYPE_QUERY = """
-query($name: String!) {
-  __type(name: $name) {
-    name
-    kind
-    inputFields {
-      name
-      type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
-    }
-  }
-}
-"""
-
-# 항공권 검색과 관련 있어 보이는 필드만 추려 응답을 짧게 유지한다
-FLIGHT_FIELD_RE = re.compile(r'internation|domestic|flight|air|fare|schedule|list', re.I)
-
-
-def _render_type_ref(type_ref):
-    """introspection의 중첩된 타입 표현을 '[ItineraryInput!]!' 형태로 편다."""
-    if not type_ref:
-        return '?'
-    kind = type_ref.get('kind')
-    if kind == 'NON_NULL':
-        return _render_type_ref(type_ref.get('ofType')) + '!'
-    if kind == 'LIST':
-        return '[' + _render_type_ref(type_ref.get('ofType')) + ']'
-    return type_ref.get('name') or '?'
-
-
-def _post_graphql(query, variables=None, timeout=FETCH_TIMEOUT):
-    response = requests.post(
-        NAVER_GRAPHQL_URL,
-        json={'query': query, 'variables': variables or {}},
-        headers=NAVER_PAGE_HEADERS,
-        timeout=timeout,
-    )
-    try:
-        return response.status_code, response.json()
-    except ValueError:
-        return response.status_code, {'_raw': response.text[:400]}
-
-
-def introspect(timeout=FETCH_TIMEOUT, max_input_types=8):
-    """네이버 GraphQL 스키마에서 실제 필드·입력타입 이름을 뽑아온다.
-
-    요청 레시피를 추측으로 맞추는 대신 스키마에 직접 물어보기 위한 진단용.
-    (개발 환경에서는 네이버로 나갈 수 없어 배포 후에만 실행된다)
-    """
-    status, body = _post_graphql(ROOT_FIELDS_QUERY, timeout=timeout)
-    schema = (body.get('data') or {}).get('__schema') or {}
-    query_type = schema.get('queryType') or {}
-    fields = query_type.get('fields') or []
-
-    if not fields:
-        return {
-            'introspection': 'unavailable',
-            'status': status,
-            'detail': json.dumps(body, ensure_ascii=False)[:500],
-        }
-
-    def describe(field):
-        return {
-            'name': field['name'],
-            'args': [
-                {'name': arg['name'], 'type': _render_type_ref(arg.get('type'))}
-                for arg in (field.get('args') or [])
-            ],
-        }
-
-    matching = [describe(f) for f in fields if FLIGHT_FIELD_RE.search(f['name'])]
-
-    # 관심 필드의 인자로 쓰이는 입력 타입까지 펼쳐야 변수 구조를 알 수 있다
-    wanted = []
-    for field in matching:
-        for arg in field['args']:
-            name = arg['type'].strip('[]!')
-            if name not in wanted and name not in ('String', 'Int', 'Boolean', 'Float', 'ID'):
-                wanted.append(name)
-
-    input_types = {}
-    for name in wanted[:max_input_types]:
-        _, type_body = _post_graphql(INPUT_TYPE_QUERY, {'name': name}, timeout=timeout)
-        type_info = (type_body.get('data') or {}).get('__type') or {}
-        if type_info.get('inputFields'):
-            input_types[name] = [
-                {'name': f['name'], 'type': _render_type_ref(f.get('type'))}
-                for f in type_info['inputFields']
-            ]
-
-    return {
-        'introspection': 'ok',
-        'status': status,
-        'query_type': query_type.get('name'),
-        'field_count': len(fields),
-        'all_field_names': [f['name'] for f in fields],
-        'matching_fields': matching,
-        'input_types': input_types,
-    }
 
 
 SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
@@ -724,144 +600,60 @@ def discover_endpoints(
     }
 
 
-def try_endpoints(
-    candidates, origin=ORIGIN, destination='NRT', trip_days=TRIP_NIGHTS,
-    timeout=FETCH_TIMEOUT, session=None,
-):
-    """후보 엔드포인트마다 실제로 쿼리를 던져보고 뭐가 통하는지 본다.
-
-    엔드포인트별로 조합을 다 돌리면 너무 오래 걸리므로 대표 조합
-    (AIRPORT/RT) 하나로만 먼저 훑는다. 통하는 주소를 찾으면 그 주소로
-    calibrate_min_prices_by_date()를 돌리면 된다.
-    """
-    session = session or warm_session(timeout)
-    results = []
-    for endpoint in candidates:
-        entry = {'endpoint': endpoint}
-        try:
-            rows, diagnostic = fetch_min_prices_by_date(
-                origin, destination, trip_days, 'AIRPORT', 'RT',
-                timeout, session=session, endpoint=endpoint,
-            )
-            entry.update(diagnostic)
-            entry['rows'] = len(rows) if rows else 0
-        except requests.RequestException as exc:
-            entry['error'] = f'요청 실패: {exc}'
-            entry['rows'] = 0
-        results.append(entry)
-    return results
-
-
-
-def log_startup_diagnosis(timeout=FETCH_TIMEOUT):
-    """기동 시 한 번 진단을 돌려 결과를 전부 stdout으로 남긴다.
-
-    개발 환경에서는 네이버로 나갈 수 없어, 실물 응답을 볼 수 있는 길이
-    사람이 진단 URL을 눌러 결과를 복사해 주는 것뿐이었다. Render 로그는
-    기계가 직접 읽을 수 있으므로, 여기에 찍어두면 사람 손을 거치지 않고
-    원인을 좁힐 수 있다. 원인을 찾으면 이 함수 호출은 지워야 한다.
-    """
-    print(f'[flight-diag] build={BUILD_MARKER}')
-    try:
-        session = warm_session(timeout)
-        trips = iter_weekend_trips()
-        departure, return_date = trips[0]
-
-        # 확정된 레시피가 실제로 2박 3일 가격을 주는지 도시 몇 곳으로 확인
-        for code in ('FUK', 'NRT', 'BKK'):
-            rows, diagnostic = fetch_min_prices_by_date(
-                ORIGIN, code, departure, timeout, session=session,
-            )
-            row = pick_return_row(rows, departure)
-            print(
-                f'[flight-diag] {code} {departure:%m/%d}~{return_date:%m/%d} '
-                f'status={diagnostic.get("status")} 복귀일수={len(rows or [])} '
-                f'2박3일={json.dumps(row, ensure_ascii=False)} '
-                f'err={diagnostic.get("error")}'
-            )
-
-        # 전체 수집을 작은 표본으로 돌려 추천까지 나오는지 확인
-        sample_destinations = DESTINATIONS[:4]
-        offers, stats = collect_offers(
-            destinations=sample_destinations, trips=trips[:3],
-        )
-        print(f'[flight-diag] 표본수집 stats={stats}')
-        print(
-            '[flight-diag] 표본오퍼='
-            + json.dumps(
-                [
-                    {'city': o['city'], 'price': o['price'],
-                     'depart': f"{o['depart']:%Y-%m-%d}"}
-                    for o in sorted(offers, key=lambda o: o['price'])[:10]
-                ],
-                ensure_ascii=False,
-            )
-        )
-    except Exception as exc:  # 진단이 앱 기동을 막으면 안 된다
-        print(f'[flight-diag] 진단 실패: {exc!r}')
-
-
-def inspect_page(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
-    """검색 페이지가 어떤 이름으로 상태 JSON을 심는지 확인한다. (폴백 경로 진단)"""
-    departure, return_date = iter_weekend_trips()[0]
-    url = naver_flight_url(origin, destination, departure, return_date)
-    response = requests.get(url, headers=NAVER_PAGE_HEADERS, timeout=timeout)
-    return {
-        'status': response.status_code,
-        'bytes': len(response.content),
-        'state_vars': sorted(set(STATE_VAR_RE.findall(response.text))),
-    }
-
-
 def probe(origin=ORIGIN, destination='NRT', timeout=FETCH_TIMEOUT):
-    """locationType/tripType 조합을 실제로 돌려보고 뭐가 통하는지 진단한다.
+    """확정된 레시피가 지금도 통하는지 실제로 돌려보고 진단한다.
 
-    개발 환경에서는 네이버로 나갈 수 없어 이 함수만이 실물 응답을 볼 수 있는
-    유일한 창구다. 성공하면 캘리브레이션 결과와 실제 표본 행을 돌려준다.
+    개발 환경에서는 네이버로 나갈 수 없어 이 함수(와 Render 로그)만이
+    실물 응답을 볼 수 있는 창구다. 수집이 멈추면 여기부터 본다 — 어느
+    단계에서 끊겼는지(쿠키 / HTTP 상태 / 행 유무 / 2박3일 행 유무)가
+    한눈에 나온다.
     """
     session = warm_session(timeout)
+    trips = iter_weekend_trips()
+    departure, return_date = trips[0]
 
-    # 엔드포인트가 틀리면 필드가 있어도 "모르는 필드"로 거부되므로,
-    # 번들에서 실제 주소를 찾아 후보마다 던져보는 것을 먼저 한다.
-    discovered = discover_endpoints(origin=origin, destination=destination, timeout=timeout)
-    candidates = list(discovered['candidates'])
-    if NAVER_GRAPHQL_URL not in candidates:
-        candidates.append(NAVER_GRAPHQL_URL)
-    endpoint_results = try_endpoints(
-        candidates, origin=origin, destination=destination,
-        timeout=timeout, session=session,
+    checks = []
+    for code in (destination, 'FUK', 'BKK'):
+        entry = {'destination': code}
+        try:
+            rows, diagnostic = fetch_min_prices_by_date(
+                origin, code, departure, timeout, session=session,
+            )
+            entry.update(diagnostic)
+            entry['return_dates'] = len(rows or [])
+            entry['two_night_row'] = pick_return_row(rows, departure)
+        except requests.RequestException as exc:
+            entry['error'] = f'요청 실패: {exc}'
+            entry['return_dates'] = 0
+        checks.append(entry)
+
+    # 표본으로 전체 수집 경로까지 돌려 추천이 실제로 나오는지 본다
+    offers, stats = collect_offers(
+        origin=origin, destinations=DESTINATIONS[:4], trips=trips[:3],
     )
 
-    # 통하는 주소가 있으면 그 주소로 조합까지 찾아준다
-    working = next((r for r in endpoint_results if r.get('rows')), None)
-    calibration, attempts = None, []
-    if working:
-        calibration, attempts = calibrate_min_prices_by_date(
-            origin=origin, destination=destination, timeout=timeout,
-            session=session, endpoint=working['endpoint'],
-        )
-
-    departure, return_date = iter_weekend_trips()[0]
     return {
         'build': BUILD_MARKER,
+        'endpoint': NAVER_GRAPHQL_URL,
+        'variables': _min_prices_by_date_variables(origin, destination, departure),
         'cookies_obtained': len(session.cookies),
-        'endpoints_found': discovered,
-        'endpoint_results': endpoint_results,
-        'working_endpoint': working['endpoint'] if working else None,
         'origin': origin,
-        'destination': destination,
         'departure': f'{departure:%Y-%m-%d}',
         'return': f'{return_date:%Y-%m-%d}',
         'url': naver_flight_url(origin, destination, departure, return_date),
-        'calibration': calibration,
-        'attempts': attempts,
+        'checks': checks,
+        'sample_stats': stats,
+        'sample_offers': [
+            {'city': o['city'], 'price': o['price'], 'depart': f"{o['depart']:%Y-%m-%d}"}
+            for o in sorted(offers, key=lambda o: o['price'])[:10]
+        ],
     }
 
 
 def _parse_api_date(value):
     """minPricesByDate가 돌려주는 날짜 문자열을 date로 바꾼다.
 
-    정확한 포맷(YYYYMMDD vs YYYY-MM-DD)이 introspection 없이는 확실치 않아
+    실제로는 YYYYMMDD로 오지만, 포맷이 바뀌어도 죽지 않게
     둘 다 시도한다. 실물 응답을 보고 하나만 남겨도 되지만, 어느 쪽이든
     조용히 받아들이는 편이 더 안전하다.
     """
