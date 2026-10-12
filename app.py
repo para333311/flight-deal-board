@@ -2,7 +2,6 @@ import html
 import json
 import os
 import re
-import threading
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 import requests
@@ -828,12 +827,11 @@ def api_flights_run():
 
 @app.route('/api/flights/probe')
 def api_flights_probe():
-    """minPricesByDate의 locationType/tripType 후보 조합을 실제로 돌려보고
-    어떤 게 통하는지 진단한다. 브라우저에서 ?pw=1111 로 확인.
+    """확정된 수집 레시피가 지금도 통하는지 진단한다. 브라우저에서 ?pw=1111.
 
-    개발 환경에서는 네이버로 나갈 수 없어, 어떤 조합이 실제로 통하는지는
-    배포된 뒤 이 엔드포인트로만 확인할 수 있다. ?telegram=1 을 붙이면 결과를
-    텔레그램으로도 보낸다.
+    수집이 멈추면 여기부터 본다 — 어느 단계에서 끊겼는지(쿠키 / HTTP 상태 /
+    행 유무 / 2박3일 행 유무)와 표본 추천까지 한 번에 보여준다.
+    ?telegram=1 을 붙이면 결과를 텔레그램으로도 보낸다.
     """
     if request.args.get('pw') != ADMIN_PASSWORD:
         return jsonify({'success': False, 'message': 'Password Denied'}), 403
@@ -843,13 +841,14 @@ def api_flights_probe():
         # 전체를 보내면 메시지가 수십 개로 쪼개진다. 핵심만 추려 보낸다.
         summary = {
             'build': report.get('build'),
-            'working_endpoint': report.get('working_endpoint'),
-            'calibration': report.get('calibration'),
-            'candidates': report.get('endpoints_found', {}).get('candidates'),
-            'endpoint_results': [
-                {k: v for k, v in r.items() if k != 'snippet'}
-                for r in report.get('endpoint_results', [])
+            'endpoint': report.get('endpoint'),
+            'cookies_obtained': report.get('cookies_obtained'),
+            'checks': [
+                {k: v for k, v in c.items() if k != 'snippet'}
+                for c in report.get('checks', [])
             ],
+            'sample_stats': report.get('sample_stats'),
+            'sample_offers': report.get('sample_offers'),
         }
         send_telegram_message(
             '🔎 네이버 항공권 진단\n<pre>'
@@ -861,28 +860,23 @@ def api_flights_probe():
 
 @app.route('/api/flights/schema')
 def api_flights_schema():
-    """네이버 GraphQL 스키마에서 실제 필드·입력타입 이름을 조회한다.
+    """네이버가 쓰는 GraphQL 쿼리문을 JS 번들에서 다시 긁어온다.
 
-    요청 레시피를 추측으로 맞출 수 없으니 스키마에 직접 물어본다.
-    브라우저에서 ?pw=1111&telegram=1 로 실행하면 결과가 텔레그램으로도 온다.
+    introspection은 운영에서 꺼져 있어(`__schema` 거부) 쓸 수 없다. 네이버가
+    쿼리를 바꿔 수집이 깨지면, 번들에 문자열로 실려 오는 쿼리문을 여기서
+    다시 확보한다. ?op=minPricesByDate 로 특정 오퍼레이션만 볼 수 있고,
+    ?telegram=1 을 붙이면 오퍼레이션 이름 목록이 텔레그램으로도 온다.
     """
     if request.args.get('pw') != ADMIN_PASSWORD:
         return jsonify({'success': False, 'message': 'Password Denied'}), 403
 
-    report = {'graphql': flight_search.introspect()}
+    report = {}
     try:
-        report['page'] = flight_search.inspect_page()
+        report['bundle'] = flight_search.discover_queries(
+            wanted=request.args.get('op'),
+        )
     except requests.RequestException as exc:
-        report['page'] = {'error': str(exc)}
-
-    # introspection이 막혀 있으면 JS 번들에서 쿼리문을 직접 찾는다
-    if report['graphql'].get('introspection') != 'ok':
-        try:
-            report['bundle'] = flight_search.discover_queries(
-                wanted=request.args.get('op'),
-            )
-        except requests.RequestException as exc:
-            report['bundle'] = {'error': str(exc)}
+        report['bundle'] = {'error': str(exc)}
 
     if request.args.get('telegram') == '1':
         # 쿼리문까지 텔레그램으로 보내면 메시지가 수십 개로 쪼개진다.
@@ -913,15 +907,6 @@ def visitors():
         return jsonify(visitors_data)
 
 if __name__ == '__main__':
-    # 네이버 수집이 왜 실패하는지 아직 못 밝혔다. 기동 시 한 번 진단을 돌려
-    # Render 로그에 남긴다 — 사람이 진단 URL을 눌러 결과를 복사해 주지
-    # 않아도 로그만 보면 원인을 좁힐 수 있다. 백그라운드 스레드라 앱 기동을
-    # 막지 않는다. 원인을 찾으면 이 블록은 지운다. (한시적 코드)
-    if os.environ.get('FLIGHT_PROBE_ON_START', 'true').lower() == 'true':
-        threading.Thread(
-            target=flight_search.log_startup_diagnosis, daemon=True,
-        ).start()
-
     # DB 초기화
     print("DB 초기화 중...")
     init_db()

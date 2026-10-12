@@ -58,7 +58,9 @@ HTML에 링크된 스크립트가 아니라 검색을 실행할 때 동적으로
 개발 환경에서는 네이버로 나갈 수 없어 아래 순서로 배포 후 진단했다.
 
 1. **introspection** — 네이버가 운영 환경에서 꺼놨다(`__schema` 요청 거부).
+   그래서 조회 코드는 지웠다 — 쓸 수 없는 길이다.
 2. **페이지 내장 JSON** — 없음. HTML은 껍데기만 오고 운임은 XHR로 불러온다.
+   (`inspect_page`도 같은 이유로 지웠다)
 3. **JS 번들 스캔** (`discover_queries`) — 성공. introspection이 막혀 있어도
    브라우저가 보내는 쿼리문 자체는 번들에 문자열로 그대로 실려 있다.
    `<script src>`를 받아 실제 쿼리 정의를 추출해 `minPricesByDate`를
@@ -105,7 +107,12 @@ GraphQL이 에러를 주지 않는다 — 그냥 **빈 결과로 조용히** 돌
 
 - 수집이 한 건도 성공하지 못하면 "특가 없음"이 아니라 **"수집 실패"**를
   보낸다. 이 둘을 뭉뚱그리면 네이버가 막혔을 때 거짓 메시지가 나간다.
-- 원인은 `GET /api/flights/probe?pw=1111&telegram=1` 로 확인한다.
+- 수집이 멈추면 `GET /api/flights/probe?pw=1111&telegram=1` 부터 본다.
+  어느 단계에서 끊겼는지(쿠키 / HTTP 상태 / 복귀일 행 유무 / 2박3일 행
+  유무)와 표본 추천까지 한 번에 보여준다.
+- 네이버가 쿼리문 자체를 바꿔 깨졌다면
+  `GET /api/flights/schema?pw=1111&op=minPricesByDate` 로 번들에서 현재
+  쿼리문을 다시 긁어온다.
 
 ## 동작 방식
 
@@ -180,7 +187,8 @@ python app.py
   비밀번호 필요, 기본 `1111`).
 - `GET /api/visitors` / `POST /api/visitors` — 방문자 수 조회/증가.
 - `GET /api/flights/run?pw=1111` — 주말 항공권을 지금 즉시 검색해 텔레그램 발송.
-- `GET /api/flights/probe?pw=1111&telegram=1` — 네이버 수집 경로 진단.
+- `GET /api/flights/probe?pw=1111&telegram=1` — 수집 경로 진단 (레시피가 지금도 통하는지).
+- `GET /api/flights/schema?pw=1111&op=minPricesByDate` — JS 번들에서 현재 쿼리문 재확보.
 
 ## 환경 변수
 
