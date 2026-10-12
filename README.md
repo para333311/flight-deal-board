@@ -27,9 +27,9 @@
 도시가 날짜만 바꿔 그 나라 쿼터를 다 먹어버리는 것을 막기 위한 것이다.
 
 **호출 방식**: 네이버 항공권의 날짜별 캘린더 위젯이 쓰는 `minPricesByDate`
-쿼리를 직접 부른다. 이 쿼리는 도시 하나당 한 번만 불러도 여러 날짜의 최저가를
-한꺼번에 돌려주므로, (도시 × 날짜) 조합이 아니라 **도시 수만큼만**(34번)
-호출한다.
+쿼리를 `https://flight-api.naver.com/graphql`로 직접 부른다. 한 번의 호출은
+**그 출발일의 복귀일별 최저가**를 돌려주므로, (도시 × 토요일)마다 한 번씩
+호출하고 복귀일이 +2일인 행만 고른다. 34개 도시 × 13주 = 약 442번.
 
 **알려진 한계**: `minPricesByDate`는 가격·날짜만 주고 **시각(오전/오후)은
 주지 않는다**. 그래서 "갈 때 오전/올 때 오후" 조건은 아직 서버가 검증해주지
@@ -64,21 +64,48 @@ HTML에 링크된 스크립트가 아니라 검색을 실행할 때 동적으로
    `<script src>`를 받아 실제 쿼리 정의를 추출해 `minPricesByDate`를
    찾아냈다. `GET /api/flights/schema?pw=1111&telegram=1`로 다시 확인할 수
    있다.
+4. **엔드포인트 확정** — 쿼리문은 맞는데 계속 "모르는 필드"로 거부당했다.
+   후보 호스트를 전부 던져본 결과 `flight-api.naver.com/graphql`만 200 +
+   실제 행을 돌려줬다(나머지는 404/503/HTML). 처음 찍어둔 주소는 다른
+   서비스라, 그럴듯하지만 엉뚱한 에러를 열 번쯤 돌려줬다.
+5. **변수 조합 분리 실험** — 인자를 하나씩만 바꿔 배포하고 Render 로그를
+   읽어 `isNonstop`이 결과를 비우는 원인임을 확정했다. 사람이 진단 URL을
+   눌러 결과를 복사해 주는 왕복을 없앤 게 결정적이었다.
 
-### locationType/tripType 값이 안 맞을 때
+### 통하는 변수 조합 (2026-10-12 확정)
 
-`minPricesByDate`의 `departureLocationType`/`arrivalLocationType`/`tripType`
-은 (enum이 아니라) 문자열 인자라 GraphQL이 유효값을 검증해주지 않는다 —
-틀려도 에러가 아니라 그냥 빈 결과로 조용히 돌아온다. 그래서
-`calibrate_min_prices_by_date()`가 후보 조합(`LOCATION_TYPE_CANDIDATES` ×
-`TRIP_TYPE_CANDIDATES`)을 실제로 돌려보고 행이 돌아오는 첫 조합을 쓴다.
+`minPricesByDate`의 인자는 (enum이 아니라) 문자열·불리언이라 값이 틀려도
+GraphQL이 에러를 주지 않는다 — 그냥 **빈 결과로 조용히** 돌아온다. 실제로
+행이 오는 조합은 배포 후 로그 진단으로 하나씩 분리해 확정했다.
 
-- 수집이 한 건도 성공하지 못하면(캘리브레이션 실패 포함) "특가 없음"이
-  아니라 **"수집 실패"**를 보낸다. 이 둘을 뭉뚱그리면 네이버가 막혔을 때
-  거짓 메시지가 나간다.
-- 원인은 `GET /api/flights/probe?pw=1111&telegram=1` 로 확인한다. 시도한
-  조합마다 상태·행 개수·에러를 보여준다. 후보에 없는 값이 필요하면
-  `LOCATION_TYPE_CANDIDATES`/`TRIP_TYPE_CANDIDATES`에 추가하면 된다.
+```json
+{
+  "departureLocationCode": "ICN",
+  "arrivalLocationCode": "FUK",
+  "departureDate": "20261017",
+  "tripType": "RT",
+  "groupByDepartureDate": false
+}
+```
+
+- `groupByDepartureDate: false` 가 핵심이다. `true`면 그 출발일의 '아무
+  복귀일이나 포함한 최저가' 한 줄만 와서(복귀일이 25일 뒤로 오기도 한다)
+  2박 3일을 고를 수 없다. `false`면 복귀일별로 한 줄씩 오므로
+  `pick_return_row()`가 +2일 행을 집어낸다.
+- `isNonstop`은 **넣으면 안 된다** — 값과 무관하게 결과가 통째로 빈다.
+- `tripDays`는 무시된다. 일정 길이는 복귀일을 직접 골라 맞춘다.
+- `departureLocationType`/`arrivalLocationType`은 넣어도 되지만(`AIRPORT`
+  확인) 필요 없어서 빼뒀다.
+
+실제로 확인한 응답 한 줄 (ICN→후쿠오카, 토 출발 월 귀국):
+
+```json
+{"departureDate": "20261017", "returnDate": "20261019", "minPrice": 345500}
+```
+
+- 수집이 한 건도 성공하지 못하면 "특가 없음"이 아니라 **"수집 실패"**를
+  보낸다. 이 둘을 뭉뚱그리면 네이버가 막혔을 때 거짓 메시지가 나간다.
+- 원인은 `GET /api/flights/probe?pw=1111&telegram=1` 로 확인한다.
 
 ## 동작 방식
 
